@@ -61,6 +61,7 @@ const {
   DEFAULT_THIN_THRESHOLD,
 } = require('./attachment-context-guard');
 const apa7 = require('../marco-teorico/apa7');
+const { throwIfAborted } = require('../../utils/abort-signals');
 
 const prisma = (() => {
   try { return require('../../config/database'); } catch { return null; }
@@ -138,14 +139,29 @@ function summarizeForChat(text, policy) {
 
 function upsertArtifactForDelivery(artifacts, artifact) {
   if (!Array.isArray(artifacts) || !artifact) return null;
+  const artifactId = String(artifact.id || '').trim();
   const filename = String(artifact.filename || '').trim().toLowerCase();
   const format = String(artifact.format || artifact.mime || '').trim().toLowerCase();
-  const existingIndex = filename
-    ? artifacts.findIndex((item) => (
-      String(item?.filename || '').trim().toLowerCase() === filename
-      && String(item?.format || item?.mime || '').trim().toLowerCase() === format
-    ))
+  const sourceFileId = String(artifact.sourceFileId || '').trim();
+  let existingIndex = artifactId
+    ? artifacts.findIndex((item) => String(item?.id || '').trim() === artifactId)
     : -1;
+  if (existingIndex < 0 && sourceFileId) {
+    existingIndex = artifacts.findIndex((item) => (
+      String(item?.sourceFileId || '').trim() === sourceFileId
+    ));
+  }
+  if (existingIndex < 0 && filename) {
+    existingIndex = artifacts.findIndex((item) => {
+      const sameDeliverySlot = (
+        String(item?.filename || '').trim().toLowerCase() === filename
+        && String(item?.format || item?.mime || '').trim().toLowerCase() === format
+      );
+      if (!sameDeliverySlot) return false;
+      const existingSourceFileId = String(item?.sourceFileId || '').trim();
+      return !(sourceFileId && existingSourceFileId && sourceFileId !== existingSourceFileId);
+    });
+  }
   if (existingIndex >= 0) artifacts.splice(existingIndex, 1, artifact);
   else artifacts.push(artifact);
   return artifact;
@@ -1572,6 +1588,31 @@ function shouldRunSourcePreservingEdit({
     || isSourcePreservingEditRequest(request, fileIds);
 }
 
+function isValidatedSourcePreservingDeliverable(item) {
+  return Boolean(item?.artifact?.id && item?.validation?.passed === true);
+}
+
+const SOURCE_PRESERVING_TARGET_NOT_LOCATED_CODES = new Set([
+  'DELETE_TEXT_NOT_FOUND', 'DELETE_TEXT_UNSPECIFIED',
+  'REPLACE_TEXT_NOT_FOUND', 'REPLACE_TEXT_UNSPECIFIED',
+  'SECTION_TABLE_NOT_FOUND', 'CRONOGRAMA_TABLE_NOT_FOUND',
+  'XLSX_REPLACE_TEXT_NOT_FOUND', 'XLSX_REPLACE_TEXT_UNSPECIFIED',
+  'PPTX_REPLACE_TEXT_NOT_FOUND', 'PPTX_REPLACE_TEXT_UNSPECIFIED',
+]);
+
+function isSourcePreservingTargetNotLocatedError(err) {
+  return Boolean(err && SOURCE_PRESERVING_TARGET_NOT_LOCATED_CODES.has(err.code));
+}
+
+function buildSourcePreservingFailureMarkdown(err) {
+  const detail = err?.message || 'no se pudo ubicar con precisión el fragmento, sección o tabla solicitada';
+  return [
+    `No pude editar el archivo original sin cambiarlo: ${detail}.`,
+    'No generé un documento nuevo para evitar entregarte contenido que no conserve tu archivo.',
+    'Indica el texto exacto, página, encabezado, tabla o sección donde debo aplicar el cambio y lo reintento sobre el mismo documento.',
+  ].join(' ');
+}
+
 function runAgentTaskJob(payload = {}, job = null) {
   const taskId = payload && payload.taskId;
   if (!taskId) return _runAgentTaskJobImpl(payload, job);
@@ -1610,9 +1651,11 @@ async function _runAgentTaskJobImpl(payload = {}, job = null) {
     maxRuntimeMs = 2 * 60 * 60 * 1000,
     folderCode = null,
     cycle = null,
+    signal: externalSignal = null,
   } = payload;
   if (!taskId) throw new Error('agent task payload missing taskId');
   if (!user?.id) throw new Error('agent task payload missing user.id');
+  throwIfAborted(externalSignal);
   const plainTranscriptionRequest = isPlainTranscriptionRequest(goal);
   const hasAttachedFiles = Array.isArray(files) && files.length > 0;
   const hasEditableDocumentContext = hasAttachedFiles || Boolean(preferRecentArtifact);
@@ -1635,37 +1678,51 @@ async function _runAgentTaskJobImpl(payload = {}, job = null) {
       maxSteps: Math.min(25, maxSteps),
     }));
     if (subTasks.length >= 2) {
-      taskStore.markTaskStatus({ taskId, userId: user.id }, 'running');
-      const fj = await forkJoin({
-        subTasks,
-        user,
-        options: {
-          chatId,
-          model,
-          maxSteps: Math.min(25, maxSteps),
-          maxRuntimeMs: Math.min(maxRuntimeMs, 180_000),
-          onEvent: (type, data) => {
-            try {
-              taskStore.appendTaskEvent({ taskId, userId: user.id }, { type, payload: data });
-            } catch (err) {
-              // Best-effort: keep the multi-agent run going, but surface a lost
-              // sub-task event (durable trace + SSE replay feed off this hook).
-              console.warn('[agent-task-runner] fork_join event append failed for', taskId, '-', err?.message || err);
-            }
+      try {
+        throwIfAborted(externalSignal);
+        taskStore.markTaskStatus({ taskId, userId: user.id }, 'running');
+        const fj = await forkJoin({
+          subTasks,
+          user,
+          options: {
+            chatId,
+            model,
+            maxSteps: Math.min(25, maxSteps),
+            maxRuntimeMs: Math.min(maxRuntimeMs, 180_000),
+            signal: externalSignal,
+            onEvent: (type, data) => {
+              try {
+                taskStore.appendTaskEvent({ taskId, userId: user.id }, { type, payload: data });
+              } catch (err) {
+                // Best-effort: keep the multi-agent run going, but surface a lost
+                // sub-task event (durable trace + SSE replay feed off this hook).
+                console.warn('[agent-task-runner] fork_join event append failed for', taskId, '-', err?.message || err);
+              }
+            },
           },
-        },
-      });
-      taskStore.markTaskStatus(
-        { taskId, userId: user.id },
-        fj.ok ? 'completed' : 'failed',
-        { mergedSummary: fj.mergedSummary || null },
-      );
-      return { ok: fj.ok, pattern: 'fork_join', mergedSummary: fj.mergedSummary, results: fj.results };
+        });
+        throwIfAborted(externalSignal);
+        taskStore.markTaskStatus(
+          { taskId, userId: user.id },
+          fj.ok ? 'completed' : 'failed',
+          { mergedSummary: fj.mergedSummary || null },
+        );
+        return { ok: fj.ok, pattern: 'fork_join', mergedSummary: fj.mergedSummary, results: fj.results };
+      } catch (error) {
+        if (externalSignal?.aborted) {
+          taskStore.markTaskStatus({ taskId, userId: user.id }, 'cancelled');
+        }
+        throw error;
+      }
     }
   }
 
   const internals = routeInternals();
   const controller = new AbortController();
+  const abortFromCaller = () => {
+    if (controller.signal.aborted) return;
+    try { controller.abort(externalSignal?.reason); } catch { controller.abort(); }
+  };
   const startedAt = Date.now();
   const existing = taskStore.getTaskSnapshotForUser(taskId, user.id);
   let streamState = existing?.streamState || internals.initialAgentState();
@@ -2087,7 +2144,13 @@ async function _runAgentTaskJobImpl(payload = {}, job = null) {
 
   let stepIdCounter = 0;
   let currentStepId = null;
-  const runtimeTimer = setTimeout(() => controller.abort(), maxRuntimeMs + 5000);
+  const runtimeTimer = setTimeout(() => {
+    const timeoutError = new Error('agent_runtime_timeout');
+    timeoutError.name = 'TimeoutError';
+    timeoutError.code = 'AGENT_RUNTIME_TIMEOUT';
+    try { controller.abort(timeoutError); } catch { controller.abort(); }
+  }, maxRuntimeMs + 5000);
+  runtimeTimer.unref?.();
 
   // ── BullMQ lock heartbeat ──────────────────────────────────────────
   // Agent tasks routinely run 10–20 min (max_steps=80 reached at ~19min
@@ -2226,6 +2289,9 @@ async function _runAgentTaskJobImpl(payload = {}, job = null) {
     return { taskId, status, artifacts: artifactsList.length };
   };
 
+  if (externalSignal?.aborted) abortFromCaller();
+  else externalSignal?.addEventListener?.('abort', abortFromCaller, { once: true });
+
   try {
     // Editing the user's existing file is not the same as auto-generating a
     // new document. Prompts such as "devuélveme el mismo Word; no crees uno
@@ -2286,60 +2352,72 @@ async function _runAgentTaskJobImpl(payload = {}, job = null) {
             },
           });
         }
-        if (!preserved.validation?.passed) {
+        const preservedResults = Array.isArray(preserved.results) && preserved.results.length
+          ? preserved.results
+          : [preserved];
+        const deliverableResults = preservedResults.filter(isValidatedSourcePreservingDeliverable);
+        if (!deliverableResults.length || (!preserved.batch && !preserved.validation?.passed)) {
           const unresolved = preserved.validation?.details?.agenticCycle?.unresolvedChecks || [];
-          throw new Error(`La edición se generó pero no pasó la autoevaluación del DOCX${unresolved.length ? `: ${unresolved.join(', ')}` : '.'}`);
+          throw new Error(`La edición se generó pero no pasó la autoevaluación del documento${unresolved.length ? `: ${unresolved.join(', ')}` : '.'}`);
         }
-        const artifactEvent = {
-          id: preserved.artifact.id,
-          filename: preserved.artifact.filename,
-          format: preserved.artifact.format,
-          mime: preserved.artifact.mime,
-          sizeBytes: preserved.artifact.sizeBytes,
-          downloadUrl: preserved.artifact.downloadUrl,
-          previewHtml: preserved.previewHtml,
-          validation: preserved.validation,
-          sourceFileId: preserved.version?.sourceFileId || null,
-          documentVersion: preserved.version || null,
-        };
-        artifacts.push(artifactEvent);
-        emit({ type: 'file_artifact', artifact: artifactEvent });
-        emit({
-          type: 'checkpoint',
-          label: 'Autoevaluación del documento',
-          status: 'completed',
-          payload: preserved.validation?.details?.agenticCycle || null,
-        });
-        for (const criterion of preserved.validation?.details?.agenticCycle?.semanticCriteria || []) {
-          emit({
-            type: 'quality_gate',
-            gate: `docx_${criterion.id}`,
-            label: criterion.label || criterion.id,
-            passed: Boolean(criterion.passed),
-            summary: criterion.passed
-              ? 'Criterio verificado en el DOCX generado.'
-              : 'Criterio no cumplido en el DOCX generado.',
-            payload: criterion,
+        for (const item of deliverableResults) {
+          const artifactEvent = {
+            id: item.artifact.id,
+            filename: item.artifact.filename,
+            format: item.artifact.format,
+            mime: item.artifact.mime,
+            sizeBytes: item.artifact.sizeBytes,
+            downloadUrl: item.artifact.downloadUrl,
+            previewHtml: item.previewHtml,
+            validation: item.validation,
+            sourceFileId: item.sourceFileId || item.version?.sourceFileId || null,
+            documentVersion: item.version || null,
+          };
+          artifacts.push(artifactEvent);
+          emit({ type: 'file_artifact', artifact: artifactEvent });
+          for (const criterion of item.validation?.details?.agenticCycle?.semanticCriteria || []) {
+            emit({
+              type: 'quality_gate',
+              gate: `document_${item.artifact.id}_${criterion.id}`,
+              label: `${item.artifact.filename}: ${criterion.label || criterion.id}`,
+              passed: Boolean(criterion.passed),
+              summary: criterion.passed
+                ? 'Criterio verificado dentro del archivo generado.'
+                : 'Criterio no cumplido dentro del archivo generado.',
+              payload: criterion,
+            });
+          }
+          await persistence.persistGeneratedArtifact({
+            artifact: { ...item.artifact, validation: item.validation },
+            task,
+            previewHtml: item.previewHtml,
+            validation: item.validation,
           });
         }
         emit({
+          type: 'checkpoint',
+          label: deliverableResults.length > 1
+            ? `Autoevaluación de ${deliverableResults.length} documentos`
+            : 'Autoevaluación del documento',
+          status: 'completed',
+          payload: preserved.batch
+            ? preserved.validation?.details || null
+            : preserved.validation?.details?.agenticCycle || null,
+        });
+        emit({
           type: 'quality_gate',
           gate: 'source_preserving_document_edit',
-          label: 'Documento original conservado',
+          label: deliverableResults.length > 1 ? 'Documentos originales conservados' : 'Documento original conservado',
           passed: Boolean(preserved.validation?.passed),
-          summary: 'Se completó el archivo original sin regenerar portada, tablas ni estructura previa.',
+          summary: preserved.partial
+            ? `Se validaron ${deliverableResults.length} documentos; algunos archivos no pudieron completarse y se informaron en la respuesta.`
+            : `Se validaron ${deliverableResults.length} archivo(s) sin mutar los originales.`,
           payload: {
             ...(preserved.validation || {}),
             orchestration: preserved.orchestration || preserved.validation?.details?.orchestration || null,
           },
         });
-        await persistence.persistGeneratedArtifact({
-          artifact: { ...preserved.artifact, validation: preserved.validation },
-          task,
-          previewHtml: preserved.previewHtml,
-          validation: preserved.validation,
-        });
-        emit({ type: 'step_done', id: currentStepId, ok: Boolean(preserved.validation?.passed) });
+        emit({ type: 'step_done', id: currentStepId, ok: deliverableResults.length > 0 });
         currentStepId = null;
         return finishDeterministicTask({
           finalMarkdown: preserved.content,
@@ -2353,21 +2431,6 @@ async function _runAgentTaskJobImpl(payload = {}, job = null) {
           },
         });
       } catch (err) {
-        // "Target-not-located" failures (the literal editor couldn't find the
-        // exact string/section to delete/replace) are NOT terminal: the request
-        // is well-formed, the deterministic literal matcher just can't resolve
-        // natural language ("borra el jurado evaluador"). Fall through to the
-        // generative path (grounded in the file's text) instead of dead-ending
-        // with "No pude editar…". The semantic document_edit tool on the inline
-        // /api/ai/generate path is the primary handler; this keeps the queued
-        // surface from giving the user an error on a perfectly valid edit.
-        const TARGET_NOT_LOCATED = new Set([
-          'DELETE_TEXT_NOT_FOUND', 'DELETE_TEXT_UNSPECIFIED',
-          'REPLACE_TEXT_NOT_FOUND', 'REPLACE_TEXT_UNSPECIFIED',
-          'SECTION_TABLE_NOT_FOUND', 'CRONOGRAMA_TABLE_NOT_FOUND',
-          'XLSX_REPLACE_TEXT_NOT_FOUND', 'XLSX_REPLACE_TEXT_UNSPECIFIED',
-          'PPTX_REPLACE_TEXT_NOT_FOUND', 'PPTX_REPLACE_TEXT_UNSPECIFIED',
-        ]);
         if (err && err.__fallthroughFreshDocument) {
           // Sin archivo base que conservar: cerramos el paso de edición y
           // dejamos que el flujo genere un documento nuevo más abajo en lugar
@@ -2375,16 +2438,27 @@ async function _runAgentTaskJobImpl(payload = {}, job = null) {
           wantsSourcePreservingEdit = false;
           emit({ type: 'step_done', id: currentStepId, ok: true });
           currentStepId = null;
-        } else if (err && TARGET_NOT_LOCATED.has(err.code)) {
-          wantsSourcePreservingEdit = false;
-          emit({ type: 'step_done', id: currentStepId, ok: true });
+        } else if (isSourcePreservingTargetNotLocatedError(err)) {
+          emit({ type: 'step_done', id: currentStepId, ok: false });
           currentStepId = null;
           emit({
             type: 'quality_gate',
             gate: 'source_preserving_document_edit',
-            label: 'Reintentando la edición de forma semántica',
-            passed: true,
-            summary: 'El editor literal no ubicó el fragmento exacto; el agente reintenta la edición sobre el documento.',
+            label: 'Edición preservadora necesita una referencia exacta',
+            passed: false,
+            summary: err?.message || 'No se ubicó el fragmento exacto dentro del archivo original.',
+          });
+          return finishDeterministicTask({
+            finalMarkdown: buildSourcePreservingFailureMarkdown(err),
+            stoppedReason: 'source_preserving_document_target_not_found',
+            steps: stepIdCounter,
+            artifactsList: [],
+            metadata: {
+              sourcePreservingEdit: true,
+              sourcePreservingError: err?.message || 'target_not_found',
+              sourcePreservingErrorCode: err?.code || null,
+              sourceFileIds: files,
+            },
           });
         } else {
           emit({ type: 'step_done', id: currentStepId, ok: false });
@@ -2397,13 +2471,14 @@ async function _runAgentTaskJobImpl(payload = {}, job = null) {
             summary: err?.message || 'No se pudo editar el archivo original.',
           });
           return finishDeterministicTask({
-            finalMarkdown: `No pude editar el archivo original sin cambiarlo: ${err?.message || 'error desconocido'}. No generé un documento nuevo para evitar entregarte contenido ajeno al archivo.`,
+            finalMarkdown: buildSourcePreservingFailureMarkdown(err),
             stoppedReason: 'source_preserving_document_edit_failed',
             steps: stepIdCounter,
             artifactsList: [],
             metadata: {
               sourcePreservingEdit: true,
               sourcePreservingError: err?.message || 'unknown_error',
+              sourcePreservingErrorCode: err?.code || null,
               sourceFileIds: files,
             },
           });
@@ -3221,53 +3296,53 @@ async function _runAgentTaskJobImpl(payload = {}, job = null) {
             // para que el generador de documentos nuevos NO se dispare abajo.
             finalMarkdown = preserved.content;
           } else if (preserved?.artifact) {
-            if (!preserved.validation?.passed) {
+            const preservedResults = Array.isArray(preserved.results) && preserved.results.length
+              ? preserved.results
+              : [preserved];
+            const deliverableResults = preservedResults.filter(isValidatedSourcePreservingDeliverable);
+            if (!deliverableResults.length || (!preserved.batch && !preserved.validation?.passed)) {
               const unresolved = preserved.validation?.details?.agenticCycle?.unresolvedChecks || [];
-              throw new Error(`La edición se generó pero no pasó la autoevaluación del DOCX${unresolved.length ? `: ${unresolved.join(', ')}` : '.'}`);
+              throw new Error(`La edición se generó pero no pasó la autoevaluación del documento${unresolved.length ? `: ${unresolved.join(', ')}` : '.'}`);
             }
-            const artifactEvent = {
-              id: preserved.artifact.id,
-              filename: preserved.artifact.filename,
-              format: preserved.artifact.format,
-              mime: preserved.artifact.mime,
-              sizeBytes: preserved.artifact.sizeBytes,
-              downloadUrl: preserved.artifact.downloadUrl,
-              previewHtml: preserved.previewHtml,
-              validation: preserved.validation,
-            };
-            artifacts.push(artifactEvent);
-            emit({ type: 'file_artifact', artifact: artifactEvent });
-            emit({
-              type: 'checkpoint',
-              label: 'Autoevaluación del documento',
-              status: 'completed',
-              payload: preserved.validation?.details?.agenticCycle || null,
-            });
-            for (const criterion of preserved.validation?.details?.agenticCycle?.semanticCriteria || []) {
-              emit({
-                type: 'quality_gate',
-                gate: `docx_${criterion.id}`,
-                label: criterion.label || criterion.id,
-                passed: Boolean(criterion.passed),
-                summary: criterion.passed
-                  ? 'Criterio verificado en el DOCX generado.'
-                  : 'Criterio no cumplido en el DOCX generado.',
-                payload: criterion,
+            for (const item of deliverableResults) {
+              const artifactEvent = {
+                id: item.artifact.id,
+                filename: item.artifact.filename,
+                format: item.artifact.format,
+                mime: item.artifact.mime,
+                sizeBytes: item.artifact.sizeBytes,
+                downloadUrl: item.artifact.downloadUrl,
+                previewHtml: item.previewHtml,
+                validation: item.validation,
+                sourceFileId: item.sourceFileId || item.version?.sourceFileId || null,
+                documentVersion: item.version || null,
+              };
+              artifacts.push(artifactEvent);
+              emit({ type: 'file_artifact', artifact: artifactEvent });
+              await persistence.persistGeneratedArtifact({
+                artifact: { ...item.artifact, validation: item.validation },
+                task,
+                previewHtml: item.previewHtml,
+                validation: item.validation,
               });
             }
             emit({
+              type: 'checkpoint',
+              label: deliverableResults.length > 1
+                ? `Autoevaluación de ${deliverableResults.length} documentos`
+                : 'Autoevaluación del documento',
+              status: 'completed',
+              payload: preserved.batch ? preserved.validation?.details || null : preserved.validation?.details?.agenticCycle || null,
+            });
+            emit({
               type: 'quality_gate',
               gate: 'source_preserving_document_edit',
-              label: 'Documento original conservado',
+              label: deliverableResults.length > 1 ? 'Documentos originales conservados' : 'Documento original conservado',
               passed: Boolean(preserved.validation?.passed),
-              summary: 'Se agregó el contenido solicitado al archivo original sin regenerar portada, tablas ni estructura previa.',
+              summary: preserved.partial
+                ? `Se validaron ${deliverableResults.length} documentos y se informaron los que no pudieron completarse.`
+                : `Se validaron ${deliverableResults.length} archivo(s) sin mutar los originales.`,
               payload: preserved.validation,
-            });
-            await persistence.persistGeneratedArtifact({
-              artifact: { ...preserved.artifact, validation: preserved.validation },
-              task,
-              previewHtml: preserved.previewHtml,
-              validation: preserved.validation,
             });
             finalMarkdown = preserved.content;
           } else {
@@ -3277,25 +3352,15 @@ async function _runAgentTaskJobImpl(payload = {}, job = null) {
             wantsSourcePreservingEdit = false;
           }
         } catch (err) {
-          // A "target-not-located" literal failure is not terminal — fall
-          // through to the generative path (grounded in the file's text)
-          // instead of returning an apology, mirroring the BEFORE-loop catch.
-          const TARGET_NOT_LOCATED_POST = new Set([
-            'DELETE_TEXT_NOT_FOUND', 'DELETE_TEXT_UNSPECIFIED',
-            'REPLACE_TEXT_NOT_FOUND', 'REPLACE_TEXT_UNSPECIFIED',
-            'SECTION_TABLE_NOT_FOUND', 'CRONOGRAMA_TABLE_NOT_FOUND',
-            'XLSX_REPLACE_TEXT_NOT_FOUND', 'XLSX_REPLACE_TEXT_UNSPECIFIED',
-            'PPTX_REPLACE_TEXT_NOT_FOUND', 'PPTX_REPLACE_TEXT_UNSPECIFIED',
-          ]);
-          if (err && TARGET_NOT_LOCATED_POST.has(err.code)) {
+          if (isSourcePreservingTargetNotLocatedError(err)) {
             emit({
               type: 'quality_gate',
               gate: 'source_preserving_document_edit',
-              label: 'Reintentando la edición de forma semántica',
-              passed: true,
-              summary: 'El editor literal no ubicó el fragmento exacto; se genera el documento editado sobre el contenido del archivo.',
+              label: 'Edición preservadora necesita una referencia exacta',
+              passed: false,
+              summary: err?.message || 'No se ubicó el fragmento exacto dentro del archivo original.',
             });
-            wantsSourcePreservingEdit = false;
+            finalMarkdown = buildSourcePreservingFailureMarkdown(err);
           } else {
             emit({
               type: 'quality_gate',
@@ -3304,7 +3369,7 @@ async function _runAgentTaskJobImpl(payload = {}, job = null) {
               passed: false,
               summary: err?.message || 'No se pudo editar el archivo original.',
             });
-            finalMarkdown = `No pude editar el archivo original sin cambiarlo: ${err?.message || 'error desconocido'}. No generé un documento nuevo para evitar entregarte contenido ajeno al archivo.`;
+            finalMarkdown = buildSourcePreservingFailureMarkdown(err);
           }
         }
       }
@@ -3510,6 +3575,7 @@ async function _runAgentTaskJobImpl(payload = {}, job = null) {
     return { taskId, status: task.status };
   } finally {
     clearTimeout(runtimeTimer);
+    externalSignal?.removeEventListener?.('abort', abortFromCaller);
     if (lockHeartbeatTimer) {
       clearInterval(lockHeartbeatTimer);
       lockHeartbeatTimer = null;
@@ -3559,5 +3625,6 @@ module.exports = {
   resolveAttachmentFallbackMarkdown,
   resolveAgentToolScopes,
   shouldRunSourcePreservingEdit,
+  isValidatedSourcePreservingDeliverable,
   shouldUseDeterministicAttachmentAnswer,
 };

@@ -110,13 +110,24 @@ export function ChatEmptyStateHero({
   onSelectPrompt,
   className,
 }: ChatEmptyStateHeroProps) {
-  const greeting = React.useMemo(pickGreeting, [])
+  // Client-only gate. Both `pickGreeting` (reads the local clock) and
+  // `sampleSixPrompts` (Math.random) produce different output on the server
+  // than in the browser, so rendering them during SSR guarantees a hydration
+  // mismatch — React would discard the markup and log an error. Holding the
+  // hero back until after mount costs one frame, which the entrance fade
+  // below absorbs anyway.
+  const [mounted, setMounted] = React.useState(false)
+  React.useEffect(() => setMounted(true), [])
+
+  const greeting = React.useMemo(pickGreeting, [mounted])
   const firstName = React.useMemo(() => pickDisplayName(userName), [userName])
   // Sample once per mount: stable while the user is reading the hero,
   // re-randomised when they navigate back. `useMemo` with an empty
   // dep array gives us per-mount stability without re-rendering on
   // every keystroke in the composer below.
-  const prompts = React.useMemo(sampleSixPrompts, [])
+  const prompts = React.useMemo(sampleSixPrompts, [mounted])
+
+  if (!mounted) return null
 
   return (
     <motion.div
@@ -177,7 +188,10 @@ export function ChatEmptyStateHero({
             >
               <item.icon className="h-3.5 w-3.5" strokeWidth={1.75} />
             </span>
-            <span className="truncate text-[13px] font-medium text-foreground/85 group-hover:text-foreground">
+            {/* Two lines instead of `truncate`: at 390px the two-column grid
+                clipped the longer labels to "Comparar opcio…", which reads as
+                a layout bug rather than a deliberate cut. */}
+            <span className="line-clamp-2 min-w-0 text-[13px] font-medium leading-snug text-foreground/85 group-hover:text-foreground">
               {item.label}
             </span>
           </button>
@@ -188,7 +202,7 @@ export function ChatEmptyStateHero({
           surfaces the most useful global shortcut (⌘K / Ctrl+K opens
           the chat search). Tailwind's `kbd` lookalike style keeps it
           legible without competing with the hero. */}
-      <p className="mt-6 flex items-center justify-center gap-1.5 text-[11.5px] text-muted-foreground">
+      <p className="mt-6 hidden items-center justify-center gap-1.5 text-[11.5px] text-muted-foreground sm:flex">
         <span>Buscar chats</span>
         <kbd className="inline-flex h-5 items-center rounded-md border border-border/55 bg-muted/40 px-1.5 font-mono text-[10.5px] font-medium tracking-wide text-foreground/75">
           ⌘K

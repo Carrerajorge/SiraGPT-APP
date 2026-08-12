@@ -38,6 +38,7 @@ const eventStore = require('../services/codex/event-store');
 const runAccess = require('../services/codex/run-access');
 const pubsub = require('../services/codex/redis-pubsub');
 const runService = require('../services/codex/run-service');
+const observabilityMetrics = require('../services/codex/observability-metrics');
 const checkpointService = require('../services/codex/checkpoint-service');
 const {
   CodexSessionError,
@@ -56,7 +57,7 @@ const {
 const {
   applyPreviewFrameHeaders: applyPreviewFramePolicy,
   filterPreviewResponseHeaders,
-  injectPreviewConsoleBridge,
+  injectPreviewInteractionBridges,
   previewTokenFor: mintPreviewToken,
   previewNonceFromRequest,
   previewOriginAllowed,
@@ -1917,12 +1918,12 @@ router.use('/projects/:id/preview/:token/app', applyPreviewFrameHeaders, async (
     },
     (up) => {
       const nonce = previewNonceFromRequest(req);
-      const injectConsole = Boolean(nonce && /text\/html|application\/xhtml\+xml/i.test(String(up.headers['content-type'] || '')) && !up.headers['content-encoding']);
+      const injectInteractions = Boolean(nonce && /text\/html|application\/xhtml\+xml/i.test(String(up.headers['content-type'] || '')) && !up.headers['content-encoding']);
       const headers = filterPreviewResponseHeaders(up.headers);
-      if (injectConsole) delete headers['content-length'];
-      if (injectConsole) {
+      if (injectInteractions) delete headers['content-length'];
+      if (injectInteractions) {
         readPreviewBody(up).then((body) => {
-          const injected = injectPreviewConsoleBridge(body.toString('utf8'), nonce);
+          const injected = injectPreviewInteractionBridges(body.toString('utf8'), nonce);
           headers['content-length'] = String(Buffer.byteLength(injected));
           res.writeHead(up.statusCode || 502, headers);
           res.end(injected);
@@ -1940,6 +1941,12 @@ router.use('/projects/:id/preview/:token/app', applyPreviewFrameHeaders, async (
       }
       res.writeHead(up.statusCode || 502, headers);
       up.pipe(res);
+      // The iframe can navigate away mid-stream; aborting the upstream then
+      // frees the runner socket instead of letting the copy drain to a client
+      // that is already gone.
+      const onClientClose = () => upstream.destroy();
+      res.on('close', onClientClose);
+      res.on('error', onClientClose);
     },
   );
   upstream.on('error', () => {
@@ -2084,6 +2091,7 @@ router.post(
     body('prompt').optional({ nullable: true }).isString().isLength({ max: 20000 }),
     body('model').optional({ nullable: true }).isString().isLength({ max: 200 }),
     body('tier').optional({ nullable: true }).isString().isLength({ max: 40 }),
+    body('reasoningEffort').optional({ nullable: true }).isString().isIn(['low', 'medium', 'high', 'max']),
     body('planRunId').optional({ nullable: true }).isString().isLength({ max: 64 }),
     body('autoExecute').optional().isBoolean(),
   ],
@@ -2098,6 +2106,7 @@ router.post(
         prompt: req.body.prompt ?? null,
         model: req.body.model ?? null,
         tier: req.body.tier ?? null,
+        reasoningEffort: req.body.reasoningEffort ?? null,
         planRunId: req.body.planRunId ?? null,
         autoExecute: req.body.autoExecute === true,
       });
@@ -2275,6 +2284,15 @@ router.post('/runs/:id/cancel', authenticateToken, requireCodexAgentAccess, asyn
   }
 });
 
+router.post('/runs/:id/cancel-family', authenticateToken, requireCodexAgentAccess, async (req, res) => {
+  try {
+    const result = await runService.cancelRunFamily({ userId: req.user.id, runId: req.params.id });
+    return res.json(result);
+  } catch (err) {
+    return mapRunError(err, res);
+  }
+});
+
 router.post(
   '/runs/:id/summary-audio',
   authenticateToken,
@@ -2420,6 +2438,11 @@ router.get('/runs/:id/stream', bearerFromQueryFallback, authenticateToken, async
   const afterSeq = Number.parseInt(req.query.afterSeq, 10);
   const startSeq = Number.isFinite(afterSeq) ? afterSeq : 0;
 
+  // Platform telemetry (batch 2): TTFB = wall time from stream open to the
+  // first emitted event; chunk counter is per SSE event written.
+  const streamOpenedAt = Date.now();
+  let firstEventEmitted = false;
+
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
@@ -2439,11 +2462,22 @@ router.get('/runs/:id/stream', bearerFromQueryFallback, authenticateToken, async
   }
   req.on('close', cleanup);
   res.on('close', cleanup);
+  // Some proxies/networks destroy the socket with an 'error' event and never
+  // emit 'close'; without these the heartbeat keeps writing to a dead socket
+  // until the next 25s tick (and even res.write can silently succeed on a
+  // half-open socket). Treat either event as the client going away.
+  req.on('error', cleanup);
+  res.on('error', cleanup);
 
   function write(envelope) {
     if (closed || res.writableEnded) return false;
     try {
       res.write(`data: ${JSON.stringify(envelope)}\n\n`);
+      if (!firstEventEmitted) {
+        firstEventEmitted = true;
+        observabilityMetrics.recordStreamTtfb({ mode: run?.mode || 'unknown', ttfbMs: Date.now() - streamOpenedAt });
+      }
+      observabilityMetrics.recordStreamChunk({ surface: 'codex' });
       return true;
     } catch {
       cleanup();

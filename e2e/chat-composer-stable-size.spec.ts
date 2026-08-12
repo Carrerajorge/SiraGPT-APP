@@ -41,7 +41,10 @@ const chat = {
       id: "composer-size-assistant-message",
       chatId: "composer-size-chat",
       role: "ASSISTANT",
-      content: "Hola, lista para ayudarte.",
+      content: Array.from(
+        { length: 28 },
+        (_, index) => `Párrafo ${index + 1}. Contenido de lectura suficiente para comprobar el borde inferior del chat sin ocultar ni desvanecer las últimas líneas.`
+      ).join("\n\n"),
       timestamp: "2026-07-22T00:00:01.000Z",
     },
   ],
@@ -100,10 +103,15 @@ async function mockChatApi(page: Page, state: { hasConversation: boolean }) {
 }
 
 async function composerMetrics(page: Page) {
-  return page.getByTestId("chat-composer-surface").evaluate((surface) => {
+  const visibleSurface = page.locator('[data-testid="chat-composer-surface"]:visible').last()
+  await expect(visibleSurface).toBeVisible()
+
+  return visibleSurface.evaluate((surface) => {
     const textarea = surface.querySelector("textarea")
+    const modelTrigger = surface.querySelector<HTMLElement>(".chat-model-trigger")
     const rect = surface.getBoundingClientRect()
-    if (!textarea) throw new Error("Composer textarea is missing")
+    if (!textarea || !modelTrigger) throw new Error("Composer controls are missing")
+    const style = getComputedStyle(surface)
 
     return {
       width: rect.width,
@@ -111,8 +119,53 @@ async function composerMetrics(page: Page) {
       textareaClientHeight: textarea.clientHeight,
       textareaScrollHeight: textarea.scrollHeight,
       textareaOverflowY: getComputedStyle(textarea).overflowY,
+      borderTopWidth: style.borderTopWidth,
+      borderRadius: style.borderRadius,
+      backgroundColor: style.backgroundColor,
+      backdropFilter: style.backdropFilter,
+      beforeContent: getComputedStyle(surface, "::before").content,
+      modelBackgroundColor: getComputedStyle(modelTrigger).backgroundColor,
+      textareaOutlineStyle: getComputedStyle(textarea).outlineStyle,
     }
   })
+}
+
+async function conversationAlignmentMetrics(page: Page) {
+  const transcript = page.locator(".chat-conversation-column")
+  const composer = page.locator('[data-testid="chat-composer-surface"]:visible').last()
+
+  await expect(transcript).toBeVisible()
+  await expect(composer).toBeVisible()
+
+  return page.evaluate(() => {
+    const transcriptElement = document.querySelector<HTMLElement>(".chat-conversation-column")
+    const composerElement = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-testid="chat-composer-surface"]')
+    ).find((element) => element.getClientRects().length > 0)
+    if (!transcriptElement || !composerElement) {
+      throw new Error("Chat alignment elements are missing")
+    }
+
+    const transcriptRect = transcriptElement.getBoundingClientRect()
+    const transcriptStyle = getComputedStyle(transcriptElement)
+    const composerRect = composerElement.getBoundingClientRect()
+    const contentLeft = transcriptRect.left + Number.parseFloat(transcriptStyle.paddingLeft)
+    const contentRight = transcriptRect.right - Number.parseFloat(transcriptStyle.paddingRight)
+
+    return {
+      leftDelta: Math.abs(contentLeft - composerRect.left),
+      rightDelta: Math.abs(contentRight - composerRect.right),
+      widthDelta: Math.abs((contentRight - contentLeft) - composerRect.width),
+      composerWidth: composerRect.width,
+    }
+  })
+}
+
+async function expectConversationAlignedWithComposer(page: Page) {
+  await expect.poll(async () => {
+    const metrics = await conversationAlignmentMetrics(page)
+    return Math.max(metrics.leftDelta, metrics.rightDelta, metrics.widthDelta)
+  }).toBeLessThanOrEqual(1)
 }
 
 function expectSameComposerSize(
@@ -123,7 +176,11 @@ function expectSameComposerSize(
   expect(Math.abs(actual.height - expected.height)).toBeLessThanOrEqual(1)
 }
 
-test("desktop composer keeps the approved size across text, attachment, tool, and chat states", async ({ page }) => {
+function expectSameComposerWidth(actual: { width: number }, expected: { width: number }) {
+  expect(Math.abs(actual.width - expected.width)).toBeLessThanOrEqual(1)
+}
+
+test("desktop composer keeps the approved width across text, attachment, tool, and chat states", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   const state = { hasConversation: false }
   await mockChatApi(page, state)
@@ -134,8 +191,15 @@ test("desktop composer keeps the approved size across text, attachment, tool, an
   const approved = await composerMetrics(page)
   expect(approved.width).toBeGreaterThan(820)
   expect(approved.width).toBeLessThan(835)
-  expect(approved.height).toBeGreaterThan(100)
-  expect(approved.height).toBeLessThan(106)
+  expect(approved.height).toBeGreaterThan(92)
+  expect(approved.height).toBeLessThan(97)
+  expect(approved.borderTopWidth).toBe("1px")
+  expect(approved.borderRadius).toBe("28px")
+  expect(approved.backgroundColor).toBe("rgb(255, 255, 255)")
+  expect(approved.backdropFilter).toBe("none")
+  expect(approved.beforeContent).toBe("none")
+  expect(approved.modelBackgroundColor).toBe("rgba(0, 0, 0, 0)")
+  expect(approved.textareaOutlineStyle).toBe("none")
 
   const textarea = page.getByTestId("chat-composer-surface").locator("textarea")
   await textarea.fill([
@@ -169,12 +233,14 @@ test("desktop composer keeps the approved size across text, attachment, tool, an
   })
   await expect(page.getByLabel("Archivos adjuntos")).toBeVisible()
   const withAttachment = await composerMetrics(page)
-  expectSameComposerSize(withAttachment, approved)
+  expectSameComposerWidth(withAttachment, approved)
+  expect(withAttachment.height).toBeGreaterThan(approved.height)
+  expect(withAttachment.height - approved.height).toBeLessThan(120)
 
   await page.getByRole("button", { name: /Adjuntar archivos y herramientas|attach files & tools/i }).click()
   await page.getByRole("menuitem", { name: /Web Search|Búsqueda web/i }).click()
   const withActiveTool = await composerMetrics(page)
-  expectSameComposerSize(withActiveTool, approved)
+  expectSameComposerSize(withActiveTool, withAttachment)
 
   state.hasConversation = true
   await page.evaluate(() => {
@@ -210,3 +276,95 @@ test("mobile composer keeps its size while a long prompt scrolls internally", as
   expect(multiline.textareaScrollHeight).toBeGreaterThan(multiline.textareaClientHeight)
   expect(multiline.textareaOverflowY).toBe("auto")
 })
+
+test("conversation content rail aligns with the composer on desktop, narrow panes, and mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const state = { hasConversation: true }
+  await mockChatApi(page, state)
+
+  await page.goto("/chat?id=composer-size-chat", { waitUntil: "domcontentloaded", timeout: 120_000 })
+  await expect(page.getByTestId("chat-composer-surface")).toBeVisible({ timeout: 120_000 })
+
+  const desktop = await conversationAlignmentMetrics(page)
+  expect(desktop.composerWidth).toBeGreaterThan(820)
+  expect(desktop.composerWidth).toBeLessThan(835)
+  await expectConversationAlignedWithComposer(page)
+
+  // Sidebar/panel width changes must recenter the shared rail in its pane.
+  await page.setViewportSize({ width: 900, height: 900 })
+  await expectConversationAlignedWithComposer(page)
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expectConversationAlignedWithComposer(page)
+})
+
+test("conversation reaches the composer edge and the return pill reserves no row", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const state = { hasConversation: true }
+  await mockChatApi(page, state)
+
+  await page.goto("/chat?id=composer-size-chat", { waitUntil: "domcontentloaded", timeout: 120_000 })
+  await expect(page.getByTestId("chat-composer-surface")).toBeVisible({ timeout: 120_000 })
+
+  const viewport = page.locator(".chat-message-scroll [data-radix-scroll-area-viewport]")
+  await expect.poll(async () => viewport.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(160)
+
+  const geometry = await page.evaluate(() => {
+    const messageScroll = document.querySelector<HTMLElement>(".chat-message-scroll")
+    const messageContent = document.querySelector<HTMLElement>(".chat-message-scroll-content")
+    const composer = document.querySelector<HTMLElement>('[data-testid="chat-composer-surface"]')
+    const dock = document.querySelector<HTMLElement>(".chat-composer-dock")
+    const pill = document.querySelector<HTMLElement>('[data-testid="chat-scroll-to-bottom"]')
+    if (!messageScroll || !messageContent || !composer || !dock || !pill) {
+      throw new Error("Chat edge geometry elements are missing")
+    }
+
+    return {
+      composerGap: composer.getBoundingClientRect().top - messageScroll.getBoundingClientRect().bottom,
+      contentPaddingBottom: Number.parseFloat(getComputedStyle(messageContent).paddingBottom),
+      dockPaddingTop: Number.parseFloat(getComputedStyle(dock).paddingTop),
+      pillPosition: getComputedStyle(pill).position,
+      pillBottom: pill.getBoundingClientRect().bottom,
+      composerTop: composer.getBoundingClientRect().top,
+    }
+  })
+
+  expect(geometry.composerGap).toBeGreaterThanOrEqual(0)
+  expect(geometry.composerGap).toBeLessThanOrEqual(4)
+  expect(geometry.contentPaddingBottom).toBeLessThanOrEqual(4)
+  expect(geometry.dockPaddingTop).toBeLessThanOrEqual(2)
+  expect(geometry.pillPosition).toBe("absolute")
+  // The hidden state eases down by 8px before fading. It may touch, but must
+  // never overlap, the composer; its visible state sits above this boundary.
+  expect(geometry.pillBottom).toBeLessThanOrEqual(geometry.composerTop)
+})
+
+for (const viewport of [
+  { name: "desktop", width: 1440, height: 900 },
+  { name: "mobile", width: 390, height: 844 },
+]) {
+  test(`plus menu omits retired actions on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height })
+    const state = { hasConversation: true }
+    await mockChatApi(page, state)
+
+    await page.goto("/chat?id=composer-size-chat", { waitUntil: "domcontentloaded", timeout: 120_000 })
+    await expect(page.getByTestId("chat-composer-surface")).toBeVisible({ timeout: 120_000 })
+
+    await page.getByRole("button", { name: "Adjuntar archivos y herramientas" }).press("Enter")
+
+    const toolsMenu = page.getByRole("menu", { name: "Adjuntar archivos y herramientas" })
+    for (const label of ["Subir archivos", "Imágenes", "Voz", "Video", "Música"]) {
+      await expect(toolsMenu.getByText(label, { exact: true })).toBeVisible()
+    }
+    for (const retiredLabel of [
+      "Trabajo",
+      "Trabajo activo",
+      "Planifica, ejecuta y entrega archivos",
+      "Generador de tesis",
+      "Vista previa de tesis académica",
+    ]) {
+      await expect(toolsMenu.getByText(retiredLabel, { exact: true })).toHaveCount(0)
+    }
+  })
+}

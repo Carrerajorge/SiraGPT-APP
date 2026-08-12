@@ -36,7 +36,6 @@ import { codexApi } from "@/lib/codex/codex-api"
 import { persistWorkspaceCodexProject } from "@/lib/codex/codex-project-link"
 import { projectsService } from "@/lib/projects-service"
 import { useAuth } from "@/lib/auth-context-integrated"
-import { useCodexHealth } from "@/lib/codex/use-codex-health"
 
 const CodeWorkspace = dynamic(
   () => import("@/components/code/code-workspace").then((mod) => mod.CodeWorkspace),
@@ -46,26 +45,6 @@ const CodeWorkspace = dynamic(
   },
 )
 
-// The real agent surface (Codex V2): a plan → build → run → observe → auto-fix
-// loop with a run timeline, plan cards, checkpoints/rollback and a live preview
-// — an agent you give orders to, not a one-shot template generator.
-const CodexAgentPanel = dynamic(
-  () => import("@/components/codex/codex-agent-panel").then((mod) => mod.CodexAgentPanel),
-  {
-    ssr: false,
-    loading: () => <CodeWorkspaceSkeleton />,
-  },
-)
-
-// WorkspaceSurface — mount the real Codex agent when the V2 flag is on
-// (useCodexHealth probes GET /api/codex/health, public + sticky), otherwise
-// fall back to the legacy deterministic CodeWorkspace so /code is never broken.
-function WorkspaceSurface() {
-  const { enabled, loading } = useCodexHealth()
-  if (loading) return <CodeWorkspaceSkeleton />
-  return enabled ? <CodexAgentPanel surface="code" /> : <CodeWorkspace />
-}
-
 export default function CodeWorkspacePage() {
   return (
     <CodeWorkspaceGate>
@@ -73,7 +52,7 @@ export default function CodeWorkspacePage() {
         <React.Suspense fallback={null}>
           <ActiveFolderHydrator />
         </React.Suspense>
-        <WorkspaceSurface />
+        <CodeWorkspace />
       </CodeWorkspaceProvider>
     </CodeWorkspaceGate>
   )
@@ -91,12 +70,13 @@ function CodeWorkspaceGate({ children }: { children: React.ReactNode }) {
   const { user, isLoading } = useAuth()
   const router = useRouter()
 
+  React.useEffect(() => {
+    if (!isLoading && !user) router.replace("/auth/login?next=/code")
+  }, [isLoading, router, user])
+
   if (isLoading) return <CodeWorkspaceSkeleton />
 
-  if (!user) {
-    if (typeof window !== "undefined") router.replace("/auth/login?next=/code")
-    return <CodeWorkspaceSkeleton />
-  }
+  if (!user) return <CodeWorkspaceSkeleton />
 
   return <>{children}</>
 }
@@ -187,9 +167,10 @@ function ActiveFolderHydrator() {
     } catch {
       /* fail soft */
     }
-    window.setTimeout(() => {
+    const timer = window.setTimeout(() => {
       window.dispatchEvent(new CustomEvent(CODE_OPEN_TOOL_EVENT, { detail: { toolId } }))
     }, 120)
+    return () => window.clearTimeout(timer)
   }, [toolId])
 
   React.useEffect(() => {
@@ -215,11 +196,20 @@ function ActiveFolderHydrator() {
       projectId: projectId || undefined,
       title,
     }
+    let dispatched = false
     const openAgent = () => {
+      dispatched = true
       window.dispatchEvent(new CustomEvent(CODE_NEW_CODE_CHAT_EVENT, { detail }))
     }
-    window.setTimeout(openAgent, 220)
-    window.setTimeout(openAgent, 900)
+    const primaryTimer = window.setTimeout(openAgent, 220)
+    const retryTimer = window.setTimeout(openAgent, 900)
+    return () => {
+      window.clearTimeout(primaryTimer)
+      window.clearTimeout(retryTimer)
+      // If dependencies changed before either dispatch, allow the replacement
+      // effect to schedule the same agent/workspace signature again.
+      if (!dispatched && firedAgentRef.current === signature) firedAgentRef.current = null
+    }
   }, [activeFolder?.id, activeFolder?.name, agentId, folderId, localId])
 
   if (!routeIssue) return null

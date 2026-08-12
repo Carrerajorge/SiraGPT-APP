@@ -257,7 +257,6 @@ const DEPARTMENT_ICONS: Record<string, React.ComponentType<{ className?: string 
   "ceo-office": Radio,
   "agent-infrastructure": Cpu,
   "growth-engines": TrendingUp,
-  "sales-operations": BriefcaseBusiness,
   localization: Languages,
   integrations: PlugZap,
   trust: ShieldCheck,
@@ -799,11 +798,43 @@ export function AgentCompanyPanel() {
           setCompanyCapacity(proactiveResult.value.capacity || null)
           setDepartmentPools(Array.isArray(proactiveResult.value.departmentPools) ? proactiveResult.value.departmentPools : [])
           setProgressMemory(proactiveResult.value.memory || null)
-          const custom = proactiveResult.value.departments
+          const serverDepartments = Array.isArray(proactiveResult.value.departments)
+            ? proactiveResult.value.departments
+            : []
+          const custom = serverDepartments
             .filter((department) => department.custom)
             .map((department) => ({ ...department, custom: true as const }))
           setCustomDepartments(custom)
           writeCustomDepartments(activeFolder?.id, custom)
+          // Merge built-in capacity/mission from the server so logical agents and
+          // office seats match backend fleet sizing (not the FE 1-agent fallback).
+          const builtInIds = new Set(AGENT_COMPANY_DEPARTMENTS.map((row) => row.id))
+          const serverOverrides: Record<string, DepartmentOverride> = {}
+          for (const department of serverDepartments) {
+            if (!department || department.custom || !builtInIds.has(department.id)) continue
+            const base = AGENT_COMPANY_DEPARTMENTS.find((row) => row.id === department.id)
+            if (!base) continue
+            const patch: DepartmentOverride = {}
+            if (department.desiredAgents != null && department.desiredAgents !== base.desiredAgents) {
+              patch.desiredAgents = Math.max(1, Math.min(MAX_LOGICAL_AGENTS, Number(department.desiredAgents) || 1))
+            }
+            if (department.name && department.name !== base.name) patch.name = department.name
+            if (department.mission && department.mission !== base.mission) patch.mission = department.mission
+            if (department.description && department.description !== base.description) {
+              patch.description = department.description
+            }
+            if (Object.keys(patch).length) serverOverrides[department.id] = patch
+          }
+          if (Object.keys(serverOverrides).length) {
+            setDepartmentOverrides((current) => {
+              const next = { ...current }
+              for (const [id, patch] of Object.entries(serverOverrides)) {
+                next[id] = { ...next[id], ...patch }
+              }
+              writeDepartmentOverrides(activeFolder?.id, next)
+              return next
+            })
+          }
           setProactiveOn(enabled)
           setProactiveCompanyEnabled(enabled, { workspaceId: activeFolder?.id || null })
         }
@@ -1061,12 +1092,28 @@ export function AgentCompanyPanel() {
   }, [activeFolder, companyRegistry, projects])
 
   const departmentRows = React.useMemo(() => {
+    const departmentByPoolId = new Map(
+      departmentPools.map((pool) => [pool.id, pool.departmentId] as const),
+    )
+    const runById = new Map(codexRuns.map((run) => [run.id, run] as const))
     return allDepartments.map((department) => {
       const sessions = codeChatSessions.filter(
-        (session) => departmentIdForSession(session, snapshot.rootSessionId, allDepartments) === department.id,
+        (session) => {
+          const linkedRunId = [...session.turns].reverse().find((turn) => turn.codexRunId)?.codexRunId
+          const linkedRun = linkedRunId ? runById.get(linkedRunId) || null : null
+          const durableDepartmentId = linkedRun?.departmentPoolId
+            ? departmentByPoolId.get(linkedRun.departmentPoolId) || null
+            : null
+          return (durableDepartmentId || departmentIdForSession(session, snapshot.rootSessionId, allDepartments)) === department.id
+        },
       )
       const runs = codexRuns.filter(
-        (run) => departmentIdForRun(run, allDepartments) === department.id,
+        (run) => {
+          const durableDepartmentId = run.departmentPoolId
+            ? departmentByPoolId.get(run.departmentPoolId) || null
+            : null
+          return (durableDepartmentId || departmentIdForRun(run, allDepartments)) === department.id
+        },
       )
       const activeRunCount = runs.filter(codeRunIsActive).length
       const activeSessionCount = sessions.filter(codeSessionIsActive).length
@@ -1075,7 +1122,7 @@ export function AgentCompanyPanel() {
       const latestRun = [...runs].sort((a, b) => runActivityAt(b) - runActivityAt(a))[0] || null
       return { department, sessions, runs, activeCount, latest, latestRun }
     })
-  }, [allDepartments, codeChatSessions, codexRuns, snapshot.rootSessionId])
+  }, [allDepartments, codeChatSessions, codexRuns, departmentPools, snapshot.rootSessionId])
 
   const selectedDepartment = departmentRows.find((row) => row.department.id === selectedDepartmentId) || null
   const selectedTask = codeChatSessions.find((session) => session.id === selectedTaskId) || null
@@ -1287,15 +1334,24 @@ export function AgentCompanyPanel() {
       rootSessionId = createCodeChatSession({ title: "CEO Office" })
       existingTitles.add("ceo office")
     }
-    for (const department of PROACTIVE_CORE_DEPARTMENTS) {
-      if (department.id === "ceo-office") continue
+    // Full fleet: every enabled department (built-in + custom) gets a chat seat
+    // so PROACTIVO can assign work without a missing-session race.
+    const fleet = allDepartments.length > 0 ? allDepartments : PROACTIVE_CORE_DEPARTMENTS
+    for (const department of fleet) {
+      if (department.id === "ceo-office" || department.enabled === false) continue
       const title = departmentBootstrapTitle(department)
       if (existingTitles.has(title.toLowerCase())) continue
       createCodeChatSession({ title })
       existingTitles.add(title.toLowerCase())
     }
     return rootSessionId
-  }, [codeChatSessions, createCodeChatSession])
+  }, [allDepartments, codeChatSessions, createCodeChatSession])
+
+  // Keep department chats warm whenever PROACTIVO is on (toggle or server hydrate).
+  React.useEffect(() => {
+    if (!proactiveOn) return
+    ensureDepartmentSessions()
+  }, [proactiveOn, ensureDepartmentSessions])
 
   const toggleProactive = React.useCallback(async () => {
     const next = !proactiveOn
@@ -1447,7 +1503,7 @@ export function AgentCompanyPanel() {
     }
   }, [
     activeFolder?.id,
-    allDepartments.length,
+    allDepartments,
     associatedCodexProjectId,
     codeChatSessions,
     commandCenter?.swarm?.id,
@@ -2788,6 +2844,26 @@ export function AgentCompanyPanel() {
         model={officeModel}
         onClose={() => setOfficeOpen(false)}
         onOpenWorker={openOfficeWorker}
+        onOpenDepartment={(departmentId) => {
+          setOfficeOpen(false)
+          openDepartmentChat(departmentId)
+        }}
+        onOpenDashboard={() => {
+          setOfficeOpen(false)
+          openCompanySurface("dashboard")
+        }}
+        onOpenControl={() => {
+          setOfficeOpen(false)
+          openCompanySurface("control")
+        }}
+        onOpenFiles={() => {
+          setOfficeOpen(false)
+          openCompanySurface("files")
+        }}
+        onOpenResources={() => {
+          setOfficeOpen(false)
+          openCompanySurface("resources")
+        }}
       />
     </div>
   )
@@ -3022,24 +3098,24 @@ function CompanyHome({
         <button
           type="button"
           onClick={onOpenOffice}
-          className="group relative block aspect-[16/9] w-full overflow-hidden rounded-lg border border-zinc-300/70 bg-[#dce5e9] text-left shadow-[0_12px_30px_-22px_rgba(15,23,42,0.7)] transition-shadow hover:shadow-[0_16px_34px_-20px_rgba(15,23,42,0.72)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="group relative block aspect-[16/9] w-full overflow-hidden rounded-xl border border-sky-400/20 bg-[#05070d] text-left shadow-[0_18px_38px_-22px_rgba(2,132,199,0.58)] transition duration-200 hover:-translate-y-0.5 hover:border-sky-400/40 hover:shadow-[0_24px_48px_-24px_rgba(2,132,199,0.72)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500"
           aria-label="Abrir oficina de agentes"
           data-testid="agent-company-live-preview"
         >
           <div className="pointer-events-none absolute inset-0">
             <AgentOfficeScene model={officeModel} variant="thumbnail" paused={officeOpen} />
           </div>
-          <span className="absolute left-3 top-3 inline-flex items-center gap-2 rounded-md border border-white/70 bg-white/[0.9] px-2.5 py-1 text-[11px] font-semibold text-zinc-800 shadow-sm backdrop-blur-xl">
-            <span className={cn("h-2 w-2 rounded-full", officeModel.activeCount > 0 ? "bg-sky-400" : "bg-zinc-400")} />
-            Oficina · {officeModel.truth.occupiedDesks}/{officeModel.truth.physicalAgents || officeModel.activeCount} puestos
+          <span className="absolute left-3 top-3 inline-flex items-center gap-2 rounded-lg border border-white/10 bg-[#09111f]/90 px-2.5 py-1.5 text-[11px] font-semibold text-slate-100 shadow-lg backdrop-blur-xl">
+            <span className={cn("h-2 w-2 rounded-full", officeModel.activeCount > 0 ? "bg-sky-400" : "bg-slate-500")} />
+            Oficina · {officeModel.truth.occupiedDesks}/{officeModel.departments.reduce((total, department) => total + Math.max(1, department.pool.size), 0)} puestos
             {officeModel.truth.latestBlockers.length > 0
               ? ` · ${officeModel.truth.latestBlockers.length} bloqueos`
               : officeModel.truth.pendingApprovals > 0
                 ? ` · ${officeModel.truth.pendingApprovals} aprob.`
                 : ""}
           </span>
-          <span className="absolute inset-x-0 bottom-0 flex items-center justify-between bg-zinc-950/[0.78] px-3 py-2 text-white opacity-100 backdrop-blur-sm transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-visible:opacity-100">
-            <span className="truncate text-[11px] font-medium">Entrar a la sede de {companyName}</span>
+          <span className="absolute inset-x-0 bottom-0 flex items-center justify-between border-t border-white/10 bg-[#05070d]/80 px-3 py-2 text-white backdrop-blur-md">
+            <span className="truncate text-[11px] font-medium">Abrir megaoficina de {companyName}</span>
             <ChevronRight className="h-4 w-4" />
           </span>
         </button>
@@ -6235,7 +6311,7 @@ function FilesView({
             <div className="truncate text-[13px] font-semibold">{companyName}</div>
             <div className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">Archivos</div>
           </div>
-          <div className="relative w-44 shrink-0 sm:w-64">
+          <div className="relative min-w-0 flex-1 sm:w-64 sm:flex-none">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
             <Input
               value={query}
@@ -6247,10 +6323,10 @@ function FilesView({
           </div>
         </div>
 
-        <div className="flex min-h-0 flex-1 flex-col lg:h-[calc(100vh-220px)] lg:min-h-[640px] lg:flex-row">
+        <div className="flex min-h-0 flex-1 flex-col lg:h-[calc(100vh-220px)] lg:min-h-[520px] lg:flex-row">
           <aside className="shrink-0 border-b border-zinc-300/70 bg-[#e8e8e6]/90 p-3 dark:border-white/10 dark:bg-zinc-900/80 lg:w-56 lg:border-b-0 lg:border-r">
             <p className="px-2 text-[11px] font-semibold uppercase text-zinc-500 dark:text-zinc-400">Favoritos</p>
-            <div className="mt-2 grid gap-1 sm:grid-cols-3 lg:grid-cols-1">
+            <div className="mt-2 grid gap-1 sm:grid-cols-2 lg:grid-cols-1">
               {sidebarRows.map(({ value, label, count, icon: Icon }) => (
                 <button
                   key={value}
@@ -6489,7 +6565,7 @@ function FilesView({
                       const reviewing = missionBusy === `review:${record.id}`
                       return (
                         <article key={record.id} className="border-b border-zinc-100 last:border-b-0 dark:border-white/5" data-testid="company-mission-evidence-record">
-                          <div className="flex flex-col gap-3 px-3 py-3 lg:flex-row lg:items-center">
+                          <div className="flex flex-col gap-3 px-3 py-3">
                             <button
                               type="button"
                               className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0a84ff]"
@@ -6507,7 +6583,7 @@ function FilesView({
                                 {record.department} · {record.author} · {relativeActivity(Date.parse(record.createdAt))}
                               </span>
                             </button>
-                            <div className="flex shrink-0 items-center gap-1.5">
+                            <div className="flex shrink-0 items-center gap-1.5 self-end">
                               <Button
                                 type="button"
                                 variant="ghost"
@@ -6546,7 +6622,15 @@ function FilesView({
                             </div>
                           </div>
                           {expanded ? (
-                            <div className="grid gap-4 border-t border-zinc-100 px-3 pb-4 pt-3 text-xs dark:border-white/5 lg:grid-cols-2">
+                            <div className="grid gap-4 border-t border-zinc-100 px-3 pb-4 pt-3 text-xs dark:border-white/5">
+                              <div className="rounded-lg bg-zinc-100/75 px-3 py-2 text-[10px] text-zinc-600 dark:bg-white/5 dark:text-zinc-300">
+                                <span className="font-semibold">v{record.version} · {record.source}</span>
+                                {record.contentHash ? (
+                                  <code className="mt-1 block break-all font-mono text-[9px] text-zinc-500 dark:text-zinc-400">
+                                    {record.contentHash}
+                                  </code>
+                                ) : null}
+                              </div>
                               <div>
                                 <h3 className="text-[10px] font-semibold uppercase text-zinc-500">Entregables</h3>
                                 <div className="mt-2 space-y-2">
@@ -6584,6 +6668,27 @@ function FilesView({
                 ) : missionLedger ? (
                   <div className="mt-3 rounded-lg border border-dashed border-zinc-300 py-8 text-center text-xs text-zinc-500 dark:border-zinc-700">
                     Las misiones cerradas aparecerán aquí.
+                  </div>
+                ) : null}
+
+                {missionLedger?.reports.length ? (
+                  <div className="mt-4 space-y-2" data-testid="company-activity-reports">
+                    {missionLedger.reports.map((report) => (
+                      <div
+                        key={report.id}
+                        className="flex flex-col gap-2 rounded-lg border border-zinc-200 bg-white/75 px-3 py-2.5 text-xs dark:border-white/10 dark:bg-white/5 sm:flex-row sm:items-center"
+                      >
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate font-semibold">{report.title}</span>
+                          <span className="mt-0.5 block text-[10px] text-zinc-500">
+                            {report.author} · {report.counts.missions} misiones · {report.status === "queued" ? "En cola" : "Borrador"}
+                          </span>
+                        </span>
+                        <span className="shrink-0 rounded-md bg-zinc-100 px-2 py-1 text-[10px] font-medium text-zinc-600 dark:bg-white/10 dark:text-zinc-300">
+                          v{report.version}
+                        </span>
+                      </div>
+                    ))}
                   </div>
                 ) : null}
               </section>

@@ -402,6 +402,10 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
   --chat-mobile-bottom-clearance: max(env(safe-area-inset-bottom, 0px), 14px);
   --chat-textarea-max-height: 200px;
   --chat-mobile-gutter: 1rem;
+  /* Single source of truth for the readable conversation rail and composer.
+     Keeping this token on the chat viewport makes it survive sidebar, split
+     panel and mobile layout changes without letting both widths drift apart. */
+  --chat-content-max-width: 51.75rem;
   width: 100%;
   height: 100vh;
   height: var(--chat-viewport-height);
@@ -592,16 +596,51 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
 }
 
 .chat-initial-stage {
-  padding: calc(var(--chat-header-height, 64px) + 1rem) var(--chat-mobile-gutter)
-    calc(1rem + env(safe-area-inset-bottom, 0px));
+  /* Optical center (slightly above geometric mid) + shared rail gutters.
+     Horizontal padding alone owns the side margin; the frame must NOT also
+     subtract 2rem or the empty-state bar becomes narrower than the in-chat dock. */
+  box-sizing: border-box;
+  width: 100%;
+  padding: calc(var(--chat-header-height, 64px) + 6vh) var(--chat-mobile-gutter)
+    calc(10vh + env(safe-area-inset-bottom, 0px));
+  align-items: center;
+  justify-content: center;
+}
+
+/* Column that stacks the hero over the composer. The stage is a flex ROW, so
+   without this wrapper the two would render side by side. Width stays at 100%
+   and the rail widths remain owned by the children. */
+.chat-initial-stack {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+}
+
+.chat-empty-hero-slot {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
 }
 
 .code-target-select-button {
   position: relative;
+  display: inline-flex;
+  min-height: 2rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
   overflow: visible;
   border: 0 !important;
   background: transparent !important;
   color: hsl(var(--muted-foreground)) !important;
+  padding: 0 0.5rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
   box-shadow: none !important;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -628,6 +667,13 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
     transform 180ms var(--ease-out-soft, cubic-bezier(0.16, 1, 0.3, 1));
 }
 
+.code-target-select-button__label {
+  display: block;
+  max-width: 5.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .code-target-select-button:hover,
 .code-target-select-button:focus-visible {
   background: hsl(var(--muted) / 0.6) !important;
@@ -635,7 +681,7 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
 }
 
 .code-target-select-button--active {
-  background: hsl(var(--accent-violet) / 0.12) !important;
+  background: hsl(var(--accent-violet) / 0.1) !important;
   color: hsl(var(--accent-violet)) !important;
 }
 
@@ -663,6 +709,18 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
   }
 }
 
+@media (max-width: 640px) {
+  .code-target-select-button {
+    width: 2.75rem;
+    min-width: 2.75rem;
+    padding-inline: 0;
+  }
+
+  .code-target-select-button__label {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .code-target-select-button,
   .code-target-select-button__icon {
@@ -677,7 +735,7 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
 
 .chat-message-scroll-content {
   padding: calc(var(--chat-header-height, 64px) + 1rem) var(--chat-mobile-gutter)
-    0.5rem;
+    0.25rem;
   /* Conversación anclada a la línea superior del composer: cuando el
      contenido es corto, baja hasta tocar la barra en lugar de flotar arriba
      con un hueco vacío. Con contenido largo el scroll se comporta igual. */
@@ -688,56 +746,58 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
 }
 
 .chat-composer-dock {
-  /* Keep sticky/fixed from utility classes — do not force position here. */
-  padding: 0.375rem 1rem calc(1rem + var(--chat-mobile-bottom-clearance, env(safe-area-inset-bottom, 0px)));
-  /* Liquid edge: soft veil so message text meets the top of the composer bar
-     flush and professional, instead of a hard clip or empty white band. */
+  /* Keep sticky/fixed from utility classes — do not force position here.
+     Side padding matches --chat-mobile-gutter so the bar aligns with the
+     empty-state rail and the transcript content box. */
+  padding: 0.25rem var(--chat-mobile-gutter)
+    calc(0.875rem + var(--chat-mobile-bottom-clearance, env(safe-area-inset-bottom, 0px)));
+  /* Keep the dock transparent so the transcript remains readable all the way
+     to the composer's hairline. The surface itself owns separation/elevation. */
   background: transparent;
   isolation: isolate;
 }
 
 .chat-composer-dock::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 100%;
-  height: 1.5rem;
-  pointer-events: none;
-  z-index: 15;
-  background: linear-gradient(
-    to bottom,
-    hsl(var(--background) / 0) 0%,
-    hsl(var(--background) / 0.55) 48%,
-    hsl(var(--background) / 0.92) 78%,
-    hsl(var(--background)) 100%
-  );
+  content: none;
+  display: none;
 }
 
-.dark .chat-composer-dock::before {
-  background: linear-gradient(
-    to bottom,
-    hsl(var(--background) / 0) 0%,
-    hsl(var(--background) / 0.5) 48%,
-    hsl(var(--background) / 0.88) 78%,
-    hsl(var(--background)) 100%
-  );
-}
-
-/* The composer keeps the exact width of the approved empty-chat state in
-   every lifecycle state. The dock already supplies the mobile gutters, while
-   the empty stage needs its own 1rem gutter on either side. */
+/* Shared content rail: stage/dock own the outer gutters; the frame always
+   fills the remaining width up to the approved 828px max so empty and
+   in-chat composers share the same outer edges. */
 .chat-composer-frame {
-  width: min(calc(100% - 2rem), 51.75rem);
+  box-sizing: border-box;
+  width: min(100%, var(--chat-content-max-width));
+  max-width: 100%;
   margin-inline: auto;
 }
 
 .chat-composer-dock .chat-composer-frame {
-  width: min(100%, 51.75rem);
+  width: min(100%, var(--chat-content-max-width));
+}
+
+/* Empty stage already applies --chat-mobile-gutter; keep the frame flush to
+   that padded content box (no second 1rem inset). */
+.chat-initial-stage .chat-composer-frame {
+  width: min(100%, var(--chat-content-max-width));
 }
 
 .chat-conversation-column {
-  max-width: min(100%, 64rem);
+  /* The element owns the transcript's inline gutters. Add those gutters to
+     the shared rail width so its CONTENT box (assistant text on the left,
+     user bubbles on the right) lands exactly on the composer's outer edges.
+     At narrow widths the 100% cap produces the same pane-minus-gutters width
+     as the dock, with no breakpoint-specific arithmetic. */
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: min(
+    100%,
+    calc(
+      var(--chat-content-max-width) + var(--chat-mobile-gutter) + var(--chat-mobile-gutter)
+    )
+  );
+  margin-inline: auto;
 }
 
 .chat-user-bubble {
@@ -1081,13 +1141,14 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
 }
 
 .effort-track {
+  --effort-stop-size: 1.75rem;
   position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 1.75rem; /* roomy drag/tap strip; dots stay tiny inside */
-  margin: 0 -0.25rem;
-  padding: 0 0.25rem;
+  height: var(--effort-stop-size); /* roomy drag/tap strip; dots stay tiny inside */
+  margin: 0;
+  padding: 0;
   border-radius: 0.5rem;
   outline: none;
   cursor: pointer;
@@ -1101,26 +1162,29 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
   outline-offset: 2px;
 }
 
+/* Line and fill sit on the stop centers: half a stop in from each end so
+   the rail ends exactly under the first/last dots (not floating past them). */
 .effort-track-line,
 .effort-track-fill {
   position: absolute;
   top: 50%;
-  left: 0.7rem;
-  right: 0.7rem;
-  height: 1.5px;
+  left: calc(var(--effort-stop-size) / 2);
+  right: calc(var(--effort-stop-size) / 2);
+  height: 2px;
   transform: translateY(-50%);
   border-radius: 999px;
   pointer-events: none;
 }
 
 .effort-track-line {
-  background: hsl(var(--muted-foreground) / 0.2);
+  /* A bit grayer so the inactive rail is readable against the popover. */
+  background: hsl(220 8% 62% / 0.55);
 }
 
 .effort-track-fill {
   right: auto;
   width: 0;
-  background: hsl(var(--foreground) / 0.5);
+  background: hsl(220 10% 28% / 0.72);
   transition: width 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
@@ -1132,11 +1196,11 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  width: 1.75rem;
-  height: 1.75rem;
+  width: var(--effort-stop-size);
+  height: var(--effort-stop-size);
   min-width: 0;
   min-height: 0;
-  flex: 0 0 1.75rem;
+  flex: 0 0 var(--effort-stop-size);
   margin: 0;
   padding: 0;
   border: 0;
@@ -1152,10 +1216,10 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
 
 .effort-stop::after {
   content: "";
-  width: 0.3125rem;  /* 5px */
-  height: 0.3125rem;
+  width: 0.375rem;  /* 6px — sits centered on the rail */
+  height: 0.375rem;
   border-radius: 999px;
-  background: hsl(var(--muted-foreground) / 0.34);
+  background: hsl(220 8% 58% / 0.72);
   box-shadow: 0 0 0 1.5px hsl(var(--popover));
   transition:
     width 140ms cubic-bezier(0.2, 0.8, 0.2, 1),
@@ -1165,11 +1229,11 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
 }
 
 .effort-stop:hover::after {
-  background: hsl(var(--muted-foreground) / 0.5);
+  background: hsl(220 8% 42% / 0.85);
 }
 
 .effort-stop-reached::after {
-  background: hsl(var(--foreground) / 0.48);
+  background: hsl(220 10% 28% / 0.78);
 }
 
 /* Keep the bare class for contract tests / selectors; the paint is on ::after. */
@@ -1178,12 +1242,12 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
 }
 
 .effort-stop-active::after {
-  width: 0.5rem;   /* 8px thumb */
-  height: 0.5rem;
-  background: hsl(var(--foreground));
+  width: 0.5625rem;   /* 9px thumb — exact center of the stop hit target */
+  height: 0.5625rem;
+  background: hsl(220 12% 12%);
   box-shadow:
     0 0 0 1.5px hsl(var(--popover)),
-    0 0 0 2.5px hsl(var(--foreground) / 0.16);
+    0 0 0 2.5px hsl(220 12% 12% / 0.14);
 }
 
 .effort-stop-active:hover::after {
@@ -1210,20 +1274,20 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
 }
 
 .dark .effort-track-line {
-  background: hsl(0 0% 100% / 0.14);
+  background: hsl(0 0% 100% / 0.28);
 }
 
 .dark .effort-track-fill {
-  background: hsl(0 0% 100% / 0.55);
+  background: hsl(0 0% 100% / 0.62);
 }
 
 .dark .effort-stop::after {
-  background: hsl(0 0% 100% / 0.28);
+  background: hsl(0 0% 100% / 0.42);
   box-shadow: 0 0 0 1.5px hsl(var(--popover));
 }
 
 .dark .effort-stop-reached::after {
-  background: hsl(0 0% 100% / 0.5);
+  background: hsl(0 0% 100% / 0.62);
 }
 
 .dark .effort-stop-active::after {
@@ -1352,113 +1416,60 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
   color: hsl(0 0% 98% / 0.92);
 }
 
-.model-picker-effort-slider-wrap {
-  position: relative;
-  height: 1.75rem;
-  display: flex;
-  align-items: center;
+.model-picker-effort-options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.5rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
-.model-picker-effort-slider {
-  width: 100%;
-  position: relative;
-  z-index: 2;
-}
-
-.model-picker-effort-slider > span:first-child {
-  height: 1.5px !important;
-  border-radius: 999px !important;
-  background: hsl(var(--muted-foreground) / 0.2) !important;
-  overflow: visible !important;
-}
-
-.dark .model-picker-effort-slider > span:first-child {
-  background: hsl(0 0% 100% / 0.14) !important;
-}
-
-.model-picker-effort-slider > span:first-child > span {
-  background: hsl(var(--foreground) / 0.5) !important;
-  border-radius: 999px !important;
-}
-
-.dark .model-picker-effort-slider > span:first-child > span {
-  background: hsl(0 0% 100% / 0.55) !important;
-}
-
-.model-picker-effort-slider [role="slider"] {
-  width: 0.5rem !important;
-  height: 0.5rem !important;
-  border: 1.5px solid hsl(var(--popover)) !important;
-  background: hsl(var(--foreground)) !important;
-  box-shadow: 0 0 0 2.5px hsl(var(--foreground) / 0.16) !important;
-}
-
-.dark .model-picker-effort-slider [role="slider"] {
-  border-color: hsl(var(--popover)) !important;
-  background: hsl(0 0% 98%) !important;
-  box-shadow: 0 0 0 2.5px hsl(0 0% 100% / 0.18) !important;
-}
-
-.model-picker-effort-stops {
-  position: absolute;
-  inset: 0 0.05rem;
-  z-index: 3;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  pointer-events: none;
-}
-
-.model-picker-effort-stop {
-  width: 1.75rem;
-  height: 1.75rem;
+.model-picker-effort-option {
   min-width: 0;
-  min-height: 0;
+  min-height: 2.375rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 0;
-  border-radius: 0;
-  background: transparent !important;
-  padding: 0;
-  pointer-events: auto;
+  border: 1px solid hsl(var(--border) / 0.9);
+  border-radius: 0.45rem;
+  background: hsl(var(--background));
+  padding: 0.25rem 0.35rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1;
   cursor: pointer;
-  -webkit-appearance: none;
-  appearance: none;
-  box-shadow: none !important;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
 }
 
-.model-picker-effort-stop::after {
-  content: "";
-  width: 0.3125rem;
-  height: 0.3125rem;
-  border-radius: 999px;
-  background: hsl(var(--muted-foreground) / 0.34);
-  box-shadow: 0 0 0 1.5px hsl(var(--popover));
+.model-picker-effort-option:hover {
+  border-color: hsl(var(--border));
+  color: hsl(var(--foreground));
+  background: hsl(var(--muted) / 0.55);
 }
 
-.model-picker-effort-stop.is-active::after {
-  background: hsl(var(--foreground) / 0.48);
+.model-picker-effort-option.is-current {
+  border-color: hsl(var(--accent-violet) / 0.42);
+  background: hsl(var(--accent-violet) / 0.1);
+  color: hsl(var(--accent-violet));
+  box-shadow: 0 1px 3px hsl(var(--accent-violet) / 0.12), inset 0 0 0 1px hsl(var(--accent-violet) / 0.05);
 }
 
-.model-picker-effort-stop.is-current {
-  pointer-events: none;
+.model-picker-effort-option:focus-visible {
+  outline: 2px solid hsl(var(--ring) / 0.65);
+  outline-offset: 1px;
 }
 
-.model-picker-effort-stop.is-current::after {
-  opacity: 0;
+.dark .model-picker-effort-option.is-current {
+  border-color: hsl(var(--accent-violet) / 0.52);
+  background: hsl(var(--accent-violet) / 0.16);
 }
 
-.dark .model-picker-effort-stop::after {
-  background: hsl(0 0% 100% / 0.28);
-}
-
-.dark .model-picker-effort-stop.is-active::after {
-  background: hsl(0 0% 100% / 0.5);
-}
-
-.model-picker-effort-ends {
-  display: none;
+@media (pointer: coarse) {
+  .model-picker-effort-option {
+    min-height: 2.75rem;
+  }
 }
 
 .model-picker-effort-description {
@@ -1625,31 +1636,31 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
 }
 
 .image-liquid-chip {
-  --image-liquid-red: #FF0000;
-  border-color: rgba(255, 0, 0, 0.42);
+  --image-liquid-red: #7C3AED;
+  border-color: rgba(124, 58, 237, 0.42);
   color: var(--image-liquid-red);
   background:
     radial-gradient(circle at 18% 18%, rgba(255, 255, 255, 0.98), transparent 22%),
-    radial-gradient(circle at 84% 78%, rgba(255, 0, 0, 0.18), transparent 34%),
-    linear-gradient(145deg, rgba(255, 255, 255, 0.94), rgba(255, 0, 0, 0.10));
+    radial-gradient(circle at 84% 78%, rgba(124, 58, 237, 0.16), transparent 34%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.94), rgba(124, 58, 237, 0.08));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.96),
-    inset 0 0 0 1px rgba(255, 0, 0, 0.08),
-    0 14px 34px -24px rgba(255, 0, 0, 0.78),
-    0 0 0 1px rgba(255, 0, 0, 0.05);
+    inset 0 0 0 1px rgba(124, 58, 237, 0.08),
+    0 14px 34px -24px rgba(124, 58, 237, 0.60),
+    0 0 0 1px rgba(124, 58, 237, 0.05);
 }
 
 .image-liquid-chip:hover {
-  border-color: rgba(255, 0, 0, 0.68);
+  border-color: rgba(124, 58, 237, 0.68);
   background:
     radial-gradient(circle at 18% 18%, rgba(255, 255, 255, 1), transparent 22%),
-    radial-gradient(circle at 82% 72%, rgba(255, 0, 0, 0.24), transparent 34%),
-    linear-gradient(145deg, rgba(255, 255, 255, 0.98), rgba(255, 0, 0, 0.14));
+    radial-gradient(circle at 82% 72%, rgba(124, 58, 237, 0.22), transparent 34%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.98), rgba(124, 58, 237, 0.10));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.98),
-    inset 0 0 0 1px rgba(255, 0, 0, 0.12),
-    0 18px 42px -24px rgba(255, 0, 0, 0.92),
-    0 0 18px -10px rgba(255, 0, 0, 0.65);
+    inset 0 0 0 1px rgba(124, 58, 237, 0.12),
+    0 18px 42px -24px rgba(124, 58, 237, 0.75),
+    0 0 18px -10px rgba(124, 58, 237, 0.55);
 }
 
 .image-liquid-chip__wave,
@@ -1665,14 +1676,14 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
   inset: -95% -34%;
   border-radius: 9999px;
   background:
-    radial-gradient(ellipse at 20% 58%, rgba(255, 0, 0, 0.34), transparent 36%),
-    radial-gradient(ellipse at 72% 42%, rgba(255, 0, 0, 0.24), transparent 32%),
+    radial-gradient(ellipse at 20% 58%, rgba(124, 58, 237, 0.34), transparent 36%),
+    radial-gradient(ellipse at 72% 42%, rgba(124, 58, 237, 0.24), transparent 32%),
     conic-gradient(
       from 90deg,
       transparent 0deg,
-      rgba(255, 0, 0, 0) 58deg,
-      rgba(255, 0, 0, 0.48) 128deg,
-      rgba(255, 0, 0, 0.16) 188deg,
+      rgba(124, 58, 237, 0) 58deg,
+      rgba(124, 58, 237, 0.48) 128deg,
+      rgba(124, 58, 237, 0.16) 188deg,
       transparent 276deg
     );
   filter: blur(7px);
@@ -1698,7 +1709,7 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
   width: 0.375rem;
   border-radius: 9999px;
   background: var(--image-liquid-red);
-  box-shadow: 0 0 14px rgba(255, 0, 0, 0.82);
+  box-shadow: 0 0 14px rgba(124, 58, 237, 0.70);
   animation: image-liquid-pulse 1.8s ease-in-out infinite;
 }
 
@@ -1719,25 +1730,25 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
 }
 
 .image-liquid-chip__icon {
-  filter: drop-shadow(0 0 9px rgba(255, 0, 0, 0.34));
+  filter: drop-shadow(0 0 9px rgba(124, 58, 237, 0.34));
 }
 
 .image-liquid-chip__status {
   background: var(--image-liquid-red);
-  box-shadow: 0 0 12px rgba(255, 0, 0, 0.78);
+  box-shadow: 0 0 12px rgba(124, 58, 237, 0.70);
 }
 
 .dark .image-liquid-chip {
-  border-color: rgba(255, 0, 0, 0.44);
-  color: rgba(255, 92, 92, 0.98);
+  border-color: rgba(139, 92, 246, 0.45);
+  color: rgba(196, 181, 253, 0.98);
   background:
     radial-gradient(circle at 16% 18%, rgba(255, 255, 255, 0.16), transparent 24%),
-    radial-gradient(circle at 84% 72%, rgba(255, 0, 0, 0.22), transparent 34%),
-    linear-gradient(145deg, rgba(35, 5, 6, 0.92), rgba(12, 8, 9, 0.86));
+    radial-gradient(circle at 84% 72%, rgba(124, 58, 237, 0.26), transparent 34%),
+    linear-gradient(145deg, rgba(28, 14, 48, 0.92), rgba(14, 8, 28, 0.86));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.14),
-    inset 0 0 0 1px rgba(255, 0, 0, 0.08),
-    0 16px 38px -26px rgba(255, 0, 0, 0.86);
+    inset 0 0 0 1px rgba(139, 92, 246, 0.10),
+    0 16px 38px -26px rgba(124, 58, 237, 0.70);
 }
 
 @keyframes image-liquid-wave {
@@ -2832,16 +2843,12 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
 
   .chat-message-scroll-content {
     padding-top: calc(var(--chat-header-height, 56px) + 0.875rem);
-    padding-bottom: 0.375rem;
+    padding-bottom: 0.25rem;
   }
 
   .chat-composer-dock {
-    padding: 0.25rem var(--chat-mobile-gutter)
+    padding: 0.125rem var(--chat-mobile-gutter)
       calc(0.625rem + var(--chat-mobile-bottom-clearance, env(safe-area-inset-bottom, 0px)));
-  }
-
-  .chat-composer-dock::before {
-    height: 1.25rem;
   }
 
   .chat-user-bubble {
@@ -2916,10 +2923,38 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
 
 @media (max-width: 767px) {
   .chat-initial-stage {
-    align-items: flex-end !important;
+    /* `stretch` (not flex-end) so the stack can claim the full height and
+       hand the leftover space to the hero. The composer still lands on the
+       bottom edge — the stack pins it there with `justify-content: flex-end`. */
+    align-items: stretch !important;
     justify-content: center !important;
     padding-top: calc(var(--chat-header-height, 64px) + 1rem);
     padding-bottom: calc(0.625rem + var(--chat-mobile-bottom-clearance, env(safe-area-inset-bottom, 0px)));
+  }
+
+  .chat-initial-stack {
+    flex: 1 1 auto;
+    min-height: 0;
+    justify-content: flex-end;
+  }
+
+  /* The hero takes whatever height the composer leaves and centres itself in
+     it, so the start screen reads as a composed page instead of a blank
+     canvas with a bar glued to the bottom. It scrolls rather than pushing the
+     composer off-screen on short viewports. */
+  .chat-empty-hero-slot {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  /* Keyboard up: the stage becomes a fixed overlay over the visual viewport
+     and there is no room for the hero. Drop it so the composer keeps the
+     bottom edge to itself. */
+  .chat-viewport[data-chat-input-focused="true"] .chat-empty-hero-slot,
+  .chat-viewport[data-chat-keyboard="open"] .chat-empty-hero-slot {
+    display: none;
   }
 
   .chat-viewport[data-chat-input-focused="true"] .chat-initial-stage,
@@ -3487,7 +3522,7 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
    Targets #main-content (set in app/layout.tsx around <main>). */
 .skip-to-content {
   position: fixed;
-  top: 0.5rem;
+  top: -5rem;
   left: 0.5rem;
   z-index: 10000;
   padding: 0.625rem 1rem;
@@ -3499,14 +3534,14 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
   font-size: 0.875rem;
   font-weight: 600;
   text-decoration: none;
-  /* Visually hidden until focused — uses transform so screen readers
-     still see it (display:none would remove it from the a11y tree). */
-  transform: translateY(-200%);
-  transition: transform 150ms ease-out;
+  /* Keep it in the accessibility tree and tab order outside the viewport. */
+  opacity: 0;
+  pointer-events: none;
 }
-.skip-to-content:focus,
 .skip-to-content:focus-visible {
-  transform: translateY(0);
+  top: 0.5rem;
+  opacity: 1;
+  pointer-events: auto;
   outline: 2px solid hsl(var(--ring));
   outline-offset: 2px;
 }
@@ -5549,26 +5584,30 @@ footer {
 }
 .dark .canvas-ambient > * { position: relative; z-index: 1; }
 
-/* ─── Composer — premium liquid surface ──────────────────────────── */
+/* Stop control: black disc, pure white stop square (never inherits muted fg). */
+.composer-stop-button {
+  color: #fff !important;
+}
+.composer-stop-button .composer-stop-icon {
+  background-color: #fff !important;
+  box-shadow: none;
+}
+
+/* ─── Composer — quiet, minimal surface ──────────────────────────── */
 .composer-surface {
   isolation: isolate;
-  /* Hardened hairline: still 0.5px, higher contrast so the top edge reads as
-     a real professional bar boundary instead of a soft floating pill. */
-  border: 0.5px solid hsl(220 14% 78% / 0.94);
-  border-radius: 1.5rem;
-  /* Fallback only when liquid class is absent. Liquid glass overrides this
-     with a translucent fill — a solid background-color here used to win on
-     equal specificity and kill the glass effect on production. */
+  border: 1px solid hsl(220 10% 86% / 0.96);
+  border-radius: 1.75rem;
   background-color: hsl(0 0% 100%);
   box-shadow:
-    inset 0 0.5px 0 hsl(0 0% 100% / 0.95),
-    0 1px 2px hsl(220 28% 14% / 0.055),
-    0 18px 40px -26px hsl(220 30% 18% / 0.34);
+    0 1px 2px hsl(220 20% 12% / 0.035),
+    0 8px 24px -20px hsl(220 24% 14% / 0.24);
   transition:
-    border-color 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
-    box-shadow 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
-    background-color 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
-    background 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    border-color 160ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 160ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    background-color 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* Stable paint bounds so focus/hover never shift surrounding gutters. */
+  will-change: border-color, box-shadow;
 }
 
 .composer-liquid-surface,
@@ -5608,27 +5647,22 @@ footer {
 }
 
 .composer-surface:hover {
-  border-color: hsl(220 14% 72% / 0.98);
+  border-color: hsl(220 10% 82% / 0.98);
 }
 
 .composer-surface:focus-within {
-  border-color: hsl(var(--accent-violet));
+  border-color: hsl(220 9% 72% / 0.98);
   box-shadow:
-    inset 0 0.5px 0 hsl(0 0% 100% / 0.95),
-    0 1px 2px hsl(220 28% 14% / 0.055),
-    0 18px 42px -26px hsl(220 30% 18% / 0.36);
+    inset 0 0 0 1px hsl(220 9% 72% / 0.22),
+    0 1px 2px hsl(220 20% 12% / 0.04),
+    0 10px 28px -20px hsl(220 24% 14% / 0.28);
 }
 
-/* Keyboard-only focus indicator. The textarea carries inline `outline: none`
-   for the mouse path, which leaves keyboard users with nothing but the 0.5px
-   hairline — below what WCAG 2.4.11 expects. `:focus-visible` only matches
-   keyboard navigation, so pointer users keep the hairline-only design while
-   keyboard users get a real, high-contrast ring. `!important` is required to
-   beat the element's inline `outline: none`. */
+/* Keep focus on the complete composer boundary. A textarea-local outline is
+   clipped by the rounded surface and leaves four violet corner fragments;
+   the neutral border + inset line above forms one continuous focus contour. */
 .composer-textarea:focus-visible {
-  outline: 2px solid hsl(var(--accent-violet) / 0.72) !important;
-  outline-offset: -2px;
-  border-radius: 0.625rem;
+  outline: none !important;
 }
 
 /* The "mic is hot" halo pulses forever while dictation records. For users who
@@ -5641,18 +5675,20 @@ footer {
   }
 }
 
-/* Two-row composer (ChatGPT-style): text pinned to the upper hairline of the
-   bar; controls (+, model, mic, send) sit on their own row underneath. */
+/* Single-row professional composer (Claude / ChatGPT control bar):
+   [+]  [textarea grows with content]  [model · mic · send]
+   Short prompts stay compact; multi-line text grows between the side
+   controls with the action cluster bottom-aligned. */
 .composer-input-row {
-  display: grid !important;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-rows: 2.2rem auto;
-  align-items: start;
-  column-gap: 0.625rem;
-  row-gap: 0.15rem;
-  min-height: 5.25rem;
-  /* Near-zero top padding keeps placeholder/input flush with the bar edge. */
-  padding: 0.28rem 0.75rem 0.4rem !important;
+  display: flex !important;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: flex-end;
+  column-gap: 0.35rem;
+  row-gap: 0;
+  min-height: 3.35rem;
+  /* Symmetric optical inset so + and send share equal margin to the rim. */
+  padding: 0.4rem 0.45rem 0.4rem 0.4rem !important;
 }
 
 /* Attachments and connector controls remain fully available without changing
@@ -5685,27 +5721,24 @@ footer {
 }
 
 .composer-input-row > :first-child {
-  grid-column: 1;
-  grid-row: 2;
-  align-self: center;
+  flex: 0 0 auto;
+  align-self: flex-end;
 }
 
 .composer-input-row .composer-textarea-shell {
-  grid-column: 1 / -1;
-  grid-row: 1;
-  width: 100%;
+  flex: 1 1 auto;
+  width: auto;
   min-width: 0;
-  align-self: start;
+  align-self: center;
 }
 
 .composer-input-row .composer-toolbar-actions {
-  grid-column: 3;
-  grid-row: 2;
+  flex: 0 0 auto;
   justify-self: end;
-  align-self: center;
+  align-self: flex-end;
   min-height: 2.75rem;
   max-width: 100%;
-  gap: 0.375rem !important;
+  gap: 0.25rem !important;
 }
 
 .composer-input-row .composer-toolbar-actions > button {
@@ -5713,29 +5746,52 @@ footer {
   min-width: 2.75rem;
   height: 2.75rem !important;
   min-height: 2.75rem;
+  color: hsl(220 10% 38%);
 }
 
 .composer-input-row .composer-model-inline .chat-model-trigger {
   min-height: 2.75rem;
-  border-radius: 0.875rem;
-  padding-inline: 0.625rem;
-  background-color: hsl(220 14% 97% / 0.72);
+  border-color: transparent;
+  border-radius: 0.75rem;
+  padding-inline: 0.5rem;
+  background-color: transparent;
+  box-shadow: none;
 }
 
 .composer-input-row .composer-model-inline .chat-model-trigger:hover,
 .composer-input-row .composer-model-inline .chat-model-trigger[data-state="open"] {
-  border-color: hsl(220 13% 86% / 0.76);
-  background-color: hsl(220 14% 95% / 0.92);
+  border-color: transparent;
+  background-color: hsl(220 10% 94% / 0.82);
 }
 
 .composer-inline-active-tools {
-  grid-column: 2;
-  grid-row: 2;
-  align-self: center;
-  justify-self: start;
+  flex: 0 1 auto;
+  align-self: flex-end;
   min-width: 0;
-  max-width: min(56vw, 39rem);
+  max-width: min(42vw, 18rem);
   overflow: visible;
+  margin-bottom: 0.15rem;
+}
+
+.composer-footer-active-tools {
+  /* Optical inset for the chip row: it has to clear the 1.75rem corner
+     radius on the sides and leave room under the chips for their soft
+     drop shadow, otherwise they read as glued to the bottom rim.
+     overflow-x keeps everything on ONE row (menus are portaled, so
+     clipping here never hides a dropdown). */
+  padding: 0.5rem 0.9rem 0.9rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.composer-footer-active-tools::-webkit-scrollbar {
+  display: none;
+}
+
+.composer-footer-active-tools > * {
+  flex: 0 0 auto;
 }
 
 .composer-inline-active-tools > div {
@@ -5752,9 +5808,7 @@ footer {
   display: none;
 }
 
-/* Plain "+" (Claude-style): no circle, no border, no gradient — just the
-   glyph. The 44px hit area stays (contract test), and hover/open paint a
-   soft rounded wash so the affordance is still discoverable. */
+/* Plain attachment glyph with the same 44px hit area as every action. */
 .composer-plus-liquid-button {
   position: relative;
   width: 2.75rem !important;
@@ -5775,7 +5829,14 @@ footer {
 .composer-plus-liquid-button:focus-visible,
 .composer-plus-liquid-button[data-state="open"] {
   color: hsl(220 20% 10%);
-  background: hsl(220 14% 92% / 0.75);
+  background: hsl(220 10% 94% / 0.82);
+}
+
+.composer-plus-liquid-button:focus-visible,
+.composer-input-row .composer-model-inline .chat-model-trigger:focus-visible,
+.composer-input-row .composer-toolbar-actions > button:focus-visible {
+  outline: 2px solid hsl(var(--ring) / 0.58);
+  outline-offset: 2px;
 }
 
 .composer-plus-liquid-button:active {
@@ -5798,8 +5859,11 @@ footer {
 .composer-textarea-shell {
   position: relative;
   min-width: 0;
-  height: 2.2rem;
-  max-height: 2.2rem;
+  /* Idle height matches a single 15px/1.5 line with comfortable vertical room;
+     multi-line prompts grow via JS up to the shell max-height. */
+  height: auto;
+  min-height: 1.65rem;
+  max-height: min(12.5rem, 42vh);
   overflow: hidden;
 }
 
@@ -5809,14 +5873,14 @@ footer {
   /* Kill base Textarea `flex` so the first line sits on the top of the shell
      instead of optically floating mid-band with a white gap above. */
   display: block !important;
-  height: 2.2rem !important;
-  min-height: 2.2rem !important;
-  max-height: 2.2rem !important;
-  overflow-y: auto !important;
-  /* Pin text/placeholder to the upper hairline of the chat bar. */
-  padding: 0.02rem 0.15rem 0.05rem !important;
-  font-size: 1rem;
-  line-height: 1.45;
+  height: 1.65rem !important;
+  min-height: 1.65rem !important;
+  max-height: min(12.5rem, 42vh) !important;
+  overflow-y: hidden !important;
+  /* Comfortable single-line rhythm; stays optically centered with 44px actions. */
+  padding: 0.2rem 0.35rem 0.2rem 0.2rem !important;
+  font-size: 0.9375rem;
+  line-height: 1.5;
   vertical-align: top;
 }
 
@@ -5826,16 +5890,16 @@ footer {
   inset: 0;
   z-index: 1;
   box-sizing: border-box;
-  height: 2.2rem;
-  max-height: 2.2rem;
+  height: 100%;
+  max-height: min(12.5rem, 42vh);
   overflow: hidden;
   /* Must match .composer-textarea padding so caret/highlights stay locked. */
-  padding: 0.02rem 0.15rem 0.05rem;
+  padding: 0.2rem 0.35rem 0.2rem 0.2rem;
   color: hsl(var(--foreground));
-  font-size: 1rem;
+  font-size: 0.9375rem;
   font-weight: 400;
   letter-spacing: 0;
-  line-height: 1.45;
+  line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -5882,6 +5946,9 @@ footer {
   flex: 0 0 auto;
 }
 @media (max-width: 640px) {
+  .composer-footer-active-tools {
+    padding: 0.375rem 0.75rem 0.75rem;
+  }
   .composer-inline-active-tools {
     max-width: calc(100vw - 8.75rem);
   }
@@ -6007,37 +6074,38 @@ button.anti-bribery-context-chip:not(:disabled):active {
 }
 @media (max-width: 640px) {
   .composer-surface {
-    border-radius: 1.5rem;
+    border-radius: 1.75rem;
   }
   .composer-input-row {
-    column-gap: 0.5rem;
-    min-height: 5.25rem;
-    padding: 0.28rem 0.625rem 0.4rem !important;
+    column-gap: 0.3rem;
+    min-height: 3.25rem;
+    padding: 0.35rem 0.4rem 0.35rem 0.35rem !important;
   }
   .composer-input-row .composer-toolbar-actions {
-    gap: 0.25rem !important;
+    gap: 0.15rem !important;
   }
   .composer-input-row .composer-model-inline .chat-model-trigger {
     height: 2.75rem !important;
     min-height: 2.75rem;
   }
   .composer-textarea-shell .composer-textarea {
-    height: 2.35rem !important;
-    min-height: 2.35rem !important;
-    max-height: 2.35rem !important;
-    padding: 0.02rem 0.15rem 0.05rem !important;
+    height: 1.65rem !important;
+    min-height: 1.65rem !important;
+    max-height: min(10.5rem, 38vh) !important;
+    padding: 0.18rem 0.25rem 0.18rem 0.15rem !important;
     font-size: 1rem;
-    line-height: 1.45;
+    line-height: 1.5;
   }
-  .composer-textarea-shell,
-  .composer-textarea-highlights {
-    height: 2.35rem;
-    max-height: 2.35rem;
+  .composer-textarea-shell {
+    min-height: 1.65rem;
+    max-height: min(10.5rem, 38vh);
   }
   .composer-textarea-highlights {
-    padding: 0.02rem 0.15rem 0.05rem;
+    height: 100%;
+    max-height: min(10.5rem, 38vh);
+    padding: 0.18rem 0.25rem 0.18rem 0.15rem;
     font-size: 1rem;
-    line-height: 1.45;
+    line-height: 1.5;
   }
   .composer-context-field[data-context-chip="true"] :is(input, textarea) {
     padding-left: 6.85rem !important;
@@ -6054,18 +6122,17 @@ button.anti-bribery-context-chip:not(:disabled):active {
   box-shadow: none;
 }
 
-/* ─── Composer — premium dark surface ────────────────────────────── */
+/* ─── Composer — quiet dark surface ──────────────────────────────── */
 .dark .composer-surface {
   background-color: hsl(var(--composer-bg));
-  border: 0.5px solid hsl(var(--composer-border) / 0.96);
+  border: 1px solid hsl(var(--composer-border) / 0.96);
   box-shadow:
-    inset 0 0.5px 0 hsl(0 0% 100% / 0.07),
-    0 1px 2px rgba(0, 0, 0, 0.36),
-    0 18px 40px -26px rgba(0, 0, 0, 0.9);
-  transition: border-color 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
-              box-shadow   180ms cubic-bezier(0.2, 0.8, 0.2, 1),
-              background-color 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
-              background 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    0 1px 2px rgba(0, 0, 0, 0.28),
+    0 10px 28px -20px rgba(0, 0, 0, 0.86);
+  transition:
+    border-color 160ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 160ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    background-color 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 /* Re-assert liquid glass after the solid dark surface fallback so the
    translucent fill is not overwritten by equal-specificity rules above. */
@@ -6077,12 +6144,22 @@ button.anti-bribery-context-chip:not(:disabled):active {
   -webkit-backdrop-filter: blur(28px) saturate(1.65);
 }
 .dark .composer-surface:focus-within {
-  border-color: hsl(var(--accent-violet) / 0.88);
+  border-color: hsl(216 12% 38% / 0.98);
   box-shadow:
-    inset 0 0.5px 0 hsl(0 0% 100% / 0.07),
-    0 18px 42px -24px rgba(0, 0, 0, 0.92);
+    inset 0 0 0 1px hsl(216 12% 46% / 0.24),
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 12px 30px -20px rgba(0, 0, 0, 0.92);
 }
 
+.dark .composer-surface:hover {
+  border-color: hsl(216 12% 31% / 0.98);
+}
+
+.dark .composer-input-row .composer-model-inline .chat-model-trigger:hover,
+.dark .composer-input-row .composer-model-inline .chat-model-trigger[data-state="open"] {
+  border-color: transparent;
+  background-color: hsl(0 0% 100% / 0.08);
+}
 
 /* ────────────────────────────────────────────────────────────
  * Accessibility toggles applied on <html> via SettingsProvider.
