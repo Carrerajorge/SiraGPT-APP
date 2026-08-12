@@ -144,10 +144,42 @@ describe("mobile keyboard composer source contract", () => {
     assert.notEqual(initialStageIndex, -1, "missing mobile empty-chat stage rule")
     const initialStageBlock = cssBlockAt(globals, initialStageIndex)
 
+    // The stage stretches so `.chat-initial-stack` can own the full height and
+    // hand its leftover space to the hero; the stack is what pins the composer
+    // to the bottom now. The contract is unchanged — composer low, not centred
+    // — only the element enforcing it moved one level down.
     assert.match(
-      initialStageBlock,
-      /\.chat-initial-stage\s*\{[^}]*align-items:\s*flex-end\s*!important[^}]*padding-bottom:\s*calc\(0\.625rem\s*\+\s*var\(--chat-mobile-bottom-clearance/,
+      withoutCssComments(initialStageBlock),
+      /\.chat-initial-stage\s*\{[^}]*align-items:\s*stretch\s*!important[^}]*padding-bottom:\s*calc\(0\.625rem\s*\+\s*var\(--chat-mobile-bottom-clearance/,
+      "empty mobile chat stage should stretch so the stack can distribute height"
+    )
+
+    const stackIndex = globals.indexOf("\n  .chat-initial-stack {", initialStageIndex)
+    assert.notEqual(stackIndex, -1, "missing mobile empty-chat stack rule")
+
+    assert.match(
+      withoutCssComments(cssBlockAt(globals, stackIndex)),
+      /\.chat-initial-stack\s*\{[^}]*flex:\s*1 1 auto[^}]*justify-content:\s*flex-end/,
       "empty mobile chat should place the composer near the bottom, not centered vertically"
+    )
+
+    // The hero absorbs the free height above the composer; without a scroll
+    // container a tall hero on a short viewport would push the composer off.
+    const heroSlotIndex = globals.indexOf("\n  .chat-empty-hero-slot {", initialStageIndex)
+    assert.notEqual(heroSlotIndex, -1, "missing mobile empty-chat hero slot rule")
+
+    assert.match(
+      withoutCssComments(cssBlockAt(globals, heroSlotIndex)),
+      /\.chat-empty-hero-slot\s*\{[^}]*min-height:\s*0[^}]*overflow-y:\s*auto/,
+      "hero slot must be able to shrink and scroll so it never displaces the composer"
+    )
+
+    // Keyboard up, the stage becomes a fixed overlay sized to the visual
+    // viewport — there is no room for the hero, so it must collapse.
+    assert.match(
+      withoutCssComments(globals),
+      /\.chat-viewport\[data-chat-input-focused="true"\]\s+\.chat-empty-hero-slot,\s*\.chat-viewport\[data-chat-keyboard="open"\]\s+\.chat-empty-hero-slot\s*\{\s*display:\s*none;\s*\}/,
+      "hero must be hidden while the mobile keyboard is open"
     )
 
     const initialStagePinnedIndex = globals.indexOf(

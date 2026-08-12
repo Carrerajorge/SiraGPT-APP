@@ -607,6 +607,24 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
   justify-content: center;
 }
 
+/* Column that stacks the hero over the composer. The stage is a flex ROW, so
+   without this wrapper the two would render side by side. Width stays at 100%
+   and the rail widths remain owned by the children. */
+.chat-initial-stack {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+}
+
+.chat-empty-hero-slot {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+}
+
 .code-target-select-button {
   position: relative;
   display: inline-flex;
@@ -2905,10 +2923,38 @@ div[style*="position: fixed"][style*="z-index"][style*="opacity"] {
 
 @media (max-width: 767px) {
   .chat-initial-stage {
-    align-items: flex-end !important;
+    /* `stretch` (not flex-end) so the stack can claim the full height and
+       hand the leftover space to the hero. The composer still lands on the
+       bottom edge — the stack pins it there with `justify-content: flex-end`. */
+    align-items: stretch !important;
     justify-content: center !important;
     padding-top: calc(var(--chat-header-height, 64px) + 1rem);
     padding-bottom: calc(0.625rem + var(--chat-mobile-bottom-clearance, env(safe-area-inset-bottom, 0px)));
+  }
+
+  .chat-initial-stack {
+    flex: 1 1 auto;
+    min-height: 0;
+    justify-content: flex-end;
+  }
+
+  /* The hero takes whatever height the composer leaves and centres itself in
+     it, so the start screen reads as a composed page instead of a blank
+     canvas with a bar glued to the bottom. It scrolls rather than pushing the
+     composer off-screen on short viewports. */
+  .chat-empty-hero-slot {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  /* Keyboard up: the stage becomes a fixed overlay over the visual viewport
+     and there is no room for the hero. Drop it so the composer keeps the
+     bottom edge to itself. */
+  .chat-viewport[data-chat-input-focused="true"] .chat-empty-hero-slot,
+  .chat-viewport[data-chat-keyboard="open"] .chat-empty-hero-slot {
+    display: none;
   }
 
   .chat-viewport[data-chat-input-focused="true"] .chat-initial-stage,

@@ -207,6 +207,7 @@ import { useArtifactPanel } from "@/lib/artifact-panel-context"
 import { ArtifactPanel } from "@/components/chat/ArtifactPanel"
 import { SourcesPanel } from "@/components/sources-panel"
 import { GrokVoicePanel } from "@/components/chat/grok-voice-panel"
+import { ChatEmptyStateHero } from "@/components/chat/ChatEmptyStateHero"
 import { DocumentPreview, type DocumentPreviewTarget } from "./document-preview"
 import { CodePreview } from "./code-preview"
 import SpotifyResults from "./spotify-results"
@@ -8454,6 +8455,15 @@ But first, you need to connect your Spotify account securely using the button be
   // ────────────────────────────────────────────────────────────
   const { open: sidebarOpen, setOpen: setSidebarOpen, isMobile: isSidebarMobile } = useSidebar();
 
+  // `useIsMobile` starts at `undefined` and coerces to `false`, so during SSR
+  // and the first client render every viewport looks like a desktop. Anything
+  // gated on `!isSidebarMobile` therefore paints on phones too, for one frame
+  // or longer if the effect is delayed — which is how the edge tab ends up
+  // stuck against the left border of the mobile start screen. Wait for the
+  // media query to actually resolve before trusting it.
+  const [viewportResolved, setViewportResolved] = React.useState(false);
+  React.useEffect(() => setViewportResolved(true), []);
+
   // ────────────────────────────────────────────────────────────
   // Tool activation → auto-collapse the OUTER (visible) sidebar.
   //
@@ -10880,6 +10890,24 @@ I can help you with Google Calendar and Drive tasks. But first, you need to conn
     return () => window.clearTimeout(id)
   }, [isInitial])
 
+  // Hero example prompts prefill the composer instead of sending straight
+  // away: most of the pool ends mid-sentence ("Busca en la web información
+  // reciente sobre ") and expects the user to finish the thought. We drop the
+  // caret at the end so they can just keep typing.
+  const handleHeroPromptSelect = React.useCallback((prompt: string) => {
+    setInput(prompt)
+    window.setTimeout(() => {
+      const el = textareaRef.current
+      if (!el) return
+      el.focus()
+      try {
+        el.setSelectionRange(prompt.length, prompt.length)
+      } catch {
+        /* old Safari rejects setSelectionRange on some input types */
+      }
+    }, 0)
+  }, [setInput])
+
   // Any active tool/connector/thesis mode? Used to conditionally render active
   // controls only when needed so the composer stays a clean pill by default.
   const hasActiveTools = (
@@ -12232,7 +12260,7 @@ I can help you with Google Calendar and Drive tasks. But first, you need to conn
           is collapsed (we auto-collapse on Word/Excel/image/video to
           reclaim horizontal real estate). Pinned to the viewport edge
           so the user can always pop the sidebar back with one click. */}
-      {!sidebarOpen && !isSidebarMobile && (
+      {viewportResolved && !sidebarOpen && !isSidebarMobile && (
         <button
           type="button"
           onClick={() => setSidebarOpen(true)}
@@ -12446,6 +12474,20 @@ I can help you with Google Calendar and Drive tasks. But first, you need to conn
 
           {isInitial ? (
             <div className="canvas-ambient chat-initial-stage flex flex-1 items-center justify-center">
+              {/* Column stack: hero above, composer below. The stage itself is
+                  a flex ROW, so hero and composer need this wrapper or they
+                  would sit side by side. */}
+              <div className="chat-initial-stack">
+              {/* Hero — greeting + example prompts. The slot absorbs the free
+                  height on mobile (where the stage pins the composer to the
+                  bottom edge) and collapses when the keyboard opens; see
+                  `.chat-empty-hero-slot` in globals.css. */}
+              <div className="chat-empty-hero-slot">
+                <ChatEmptyStateHero
+                  userName={user?.name}
+                  onSelectPrompt={handleHeroPromptSelect}
+                />
+              </div>
               <div className="chat-composer-frame">
                   <div className="space-y-3">
                   {/* Composer — quiet production UI. The shared surface owns
@@ -12710,6 +12752,7 @@ I can help you with Google Calendar and Drive tasks. But first, you need to conn
                 }
               </p> */}
                 </div>
+              </div>
               </div>
             </div>
           ) : (
