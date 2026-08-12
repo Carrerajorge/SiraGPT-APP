@@ -6,6 +6,19 @@ and improvement cycles follow a sequential number with the date the work landed.
 
 ## [Next production release] — 2026-07-22
 
+### Fixed
+
+- The chat start screen no longer renders as a blank canvas. `ChatEmptyStateHero`
+  (greeting + example prompts) existed but was never imported, so a new chat
+  mounted only the composer. It is now wired into the initial stage, behind a
+  mount gate that keeps its clock- and random-derived content out of the server
+  render, with the composer still pinned to the bottom edge on mobile and the
+  hero collapsing while the keyboard is open. Example prompts prefill the
+  composer rather than sending, since most of them end mid-sentence.
+- The desktop-only "reopen sidebar" tab no longer appears stuck against the left
+  border on phones: `useIsMobile` reports `false` until its media query resolves,
+  so the button is now gated on a resolved-viewport flag.
+
 ### Changed
 
 - Reduced the chat composer outline to a single `0.5px` hairline in light and
